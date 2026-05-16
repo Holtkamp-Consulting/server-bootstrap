@@ -14,7 +14,7 @@ warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[✗]${NC} $*" >&2; }
 
 PORTAINER_ADMIN="admin"
-PORTAINER_PASSWORD=$(dd if=/dev/urandom bs=1 count=32 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | cut -c1-20)
+PORTAINER_PASSWORD=$(openssl rand -hex 10)
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
 
