@@ -18,31 +18,28 @@ PORTAINER_PASSWORD=$(openssl rand -hex 10)
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
 
-# Always use sudo for docker — group membership doesn't take effect in the current session
-DOCKER="sudo docker"
-
 echo ""
 echo -e "${BOLD}${BLUE}╔══════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${BLUE}║        Server Bootstrap Installer        ║${NC}"
 echo -e "${BOLD}${BLUE}╚══════════════════════════════════════════╝${NC}"
 echo ""
 
-# ── 1. Docker ─────────────────────────────────────────────────────────────────
+# ── Sudo precheck ──────────────────────────────────────────────────────────────
+# Prime sudo credentials early, before any installation steps
+log "Checking sudo access..."
+sudo -v || { err "sudo privileges required to run this script."; exit 1; }
+ok "sudo OK"
 
+# ── 1. Docker ─────────────────────────────────────────────────────────────────
 log "Step 1/3 — Docker"
 
 if command -v docker &>/dev/null; then
-    ok "Docker already installed ($(${DOCKER} --version | cut -d' ' -f3 | tr -d ','))"
+    ok "Docker already installed ($(docker --version | cut -d' ' -f3 | tr -d ','))"
 else
     log "Downloading and running official Docker install script..."
     curl -fsSL https://get.docker.com | sh
     ok "Docker installed"
-
-    if id -nG "$USER" | grep -qw docker; then
-        ok "User '$USER' already in docker group"
-    else
-        sudo usermod -aG docker "$USER" || warn "Could not add $USER to docker group — you may need to run docker with sudo"
-    fi
+    sudo usermod -aG docker "$USER" 2>/dev/null || true
 fi
 
 if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
@@ -51,14 +48,20 @@ if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
 fi
 
 # ── 2. Portainer ───────────────────────────────────────────────────────────────
-
 log "Step 2/3 — Portainer CE"
 
-${DOCKER} volume create portainer_data &>/dev/null || true
+# Use sudo only if the current user can't write to the socket directly
+if [ -w /var/run/docker.sock ]; then
+    DOCKER="docker"
+else
+    DOCKER="sudo docker"
+fi
 
-if ${DOCKER} ps -a --format '{{.Names}}' | grep -q '^portainer$'; then
+${DOCKER} volume create portainer_data >/dev/null || true
+
+if ${DOCKER} ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^portainer$'; then
     warn "Removing existing Portainer container..."
-    ${DOCKER} rm -f portainer &>/dev/null
+    ${DOCKER} rm -f portainer >/dev/null
 fi
 
 ${DOCKER} run -d \
@@ -68,12 +71,11 @@ ${DOCKER} run -d \
     -p "${PORTAINER_PORT_HTTPS}:9443" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v portainer_data:/data \
-    portainer/portainer-ce:latest &>/dev/null
+    portainer/portainer-ce:latest >/dev/null
 
 ok "Portainer container started"
 
 # ── 3. Credentials ─────────────────────────────────────────────────────────────
-
 log "Step 3/3 — Configuring admin credentials"
 
 PORTAINER_API="http://localhost:${PORTAINER_PORT_HTTP}"
@@ -105,7 +107,6 @@ else
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────────
-
 LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 LOCAL_IP="${LOCAL_IP:-localhost}"
 
