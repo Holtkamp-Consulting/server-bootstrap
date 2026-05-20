@@ -31,7 +31,7 @@ sudo -v || { err "sudo privileges required to run this script."; exit 1; }
 ok "sudo OK"
 
 # ── 1. Docker ─────────────────────────────────────────────────────────────────
-log "Step 1/5 — Docker"
+log "Step 1/6 — Docker"
 
 if command -v docker &>/dev/null; then
     ok "Docker already installed ($(docker --version | cut -d' ' -f3 | tr -d ','))"
@@ -48,7 +48,7 @@ if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
 fi
 
 # ── 2. Portainer ───────────────────────────────────────────────────────────────
-log "Step 2/5 — Portainer CE"
+log "Step 2/6 — Portainer CE"
 
 # Use sudo only if the current user can't write to the socket directly
 if [ -w /var/run/docker.sock ]; then
@@ -76,7 +76,7 @@ ${DOCKER} run -d \
 ok "Portainer container started"
 
 # ── 3. Credentials ─────────────────────────────────────────────────────────────
-log "Step 3/5 — Configuring admin credentials"
+log "Step 3/6 — Configuring admin credentials"
 
 PORTAINER_API="http://localhost:${PORTAINER_PORT_HTTP}"
 MAX_WAIT=90
@@ -107,7 +107,7 @@ else
 fi
 
 # ── 4. Infisical CLI ───────────────────────────────────────────────────────────
-log "Step 4/5 — Infisical CLI"
+log "Step 4/6 — Infisical CLI"
 
 if command -v infisical &>/dev/null; then
     ok "Infisical CLI already installed ($(infisical --version 2>&1 | head -1))"
@@ -117,16 +117,16 @@ else
     ok "Infisical CLI installed"
 fi
 
-# ── 5. Deploy-Konfiguration ────────────────────────────────────────────────────
-log "Step 5/5 — Deploy configuration"
+# ── 5. Credentials ────────────────────────────────────────────────────────────
+log "Step 5/6 — Infisical + GitHub credentials"
 
 DEPLOY_CONFIG="/etc/infisical-deploy.env"
 
 if [ -f "$DEPLOY_CONFIG" ]; then
-    warn "Deploy config already exists at $DEPLOY_CONFIG — skipping"
+    warn "Deploy config already exists at $DEPLOY_CONFIG — skipping credential setup"
+    source "$DEPLOY_CONFIG"
 else
-    log "Infisical Machine Identity credentials needed."
-    log "Create one at: Infisical UI → Project → Access Control → Machine Identities"
+    log "Infisical Machine Identity: Infisical UI → Project → Access Control → Machine Identities → Create"
     echo ""
     read -rp "  Infisical URL (e.g. http://mac-studio:80): " INF_URL
     read -rp "  Client ID:                                  " INF_CLIENT_ID
@@ -134,9 +134,11 @@ else
     echo ""
     read -rp "  Project ID:                                 " INF_PROJECT_ID
     read -rp "  Environment (prod/staging/dev):             " INF_ENV
-    read -rp "  Stack name in Portainer:                    " INF_STACK_NAME
+    echo ""
+    log "GitHub Personal Access Token (needs repo scope):"
+    read -rsp "  GitHub Token: " GITHUB_TOKEN
+    echo ""
 
-    # Portainer API token via the just-created credentials
     log "Fetching Portainer API token..."
     PORTAINER_JWT=$(curl -sf -X POST \
         -H "Content-Type: application/json" \
@@ -152,11 +154,119 @@ INFISICAL_ENV=${INF_ENV}
 INFISICAL_PATH=/
 PORTAINER_URL=http://localhost:${PORTAINER_PORT_HTTP}
 PORTAINER_TOKEN=${PORTAINER_JWT}
-PORTAINER_STACK_NAME=${INF_STACK_NAME}
+GITHUB_TOKEN=${GITHUB_TOKEN}
 EOF
     sudo chmod 600 "$DEPLOY_CONFIG"
-    ok "Deploy config written to $DEPLOY_CONFIG"
+    source "$DEPLOY_CONFIG"
+    ok "Credentials saved to $DEPLOY_CONFIG"
 fi
+
+# ── 6. Stacks deployen ─────────────────────────────────────────────────────────
+log "Step 6/6 — Stack deployment from GitHub"
+
+# Portainer local endpoint ID
+ENDPOINT_ID=$(curl -sf \
+    -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+    "${PORTAINER_URL}/api/endpoints" | jq '.[0].Id')
+
+if [ -z "$ENDPOINT_ID" ] || [ "$ENDPOINT_ID" = "null" ]; then
+    err "Could not determine Portainer endpoint ID"
+    exit 1
+fi
+
+# GitHub repos auflisten
+log "Fetching GitHub repositories..."
+REPOS_JSON=$(curl -sf \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner")
+
+mapfile -t REPO_NAMES < <(echo "$REPOS_JSON" | jq -r '.[].full_name')
+
+if [ ${#REPO_NAMES[@]} -eq 0 ]; then
+    err "No repositories found for this token"
+    exit 1
+fi
+
+echo ""
+log "Available repositories:"
+for i in "${!REPO_NAMES[@]}"; do
+    printf "  [%2d] %s\n" "$((i+1))" "${REPO_NAMES[$i]}"
+done
+echo ""
+read -rp "  Select repos to deploy (space-separated numbers, e.g. 1 3): " SELECTION
+
+# Infisical-Token holen
+log "Authenticating with Infisical..."
+INFISICAL_TOKEN=$(infisical login \
+    --method=universal-auth \
+    --client-id="${INFISICAL_CLIENT_ID}" \
+    --client-secret="${INFISICAL_CLIENT_SECRET}" \
+    --domain="${INFISICAL_URL}" \
+    --plain --silent 2>/dev/null)
+
+# Secrets als Portainer-Env-Array holen
+ENV_JSON=$(infisical secrets \
+    --token="${INFISICAL_TOKEN}" \
+    --projectId="${INFISICAL_PROJECT_ID}" \
+    --env="${INFISICAL_ENV}" \
+    --path="${INFISICAL_PATH}" \
+    --domain="${INFISICAL_URL}" \
+    --format=json --silent 2>/dev/null \
+    | jq '[.[] | {name: .secretKey, value: .secretValue}]')
+
+# Ausgewählte Repos deployen
+for NUM in $SELECTION; do
+    IDX=$((NUM - 1))
+    REPO="${REPO_NAMES[$IDX]}"
+    STACK_NAME="${REPO##*/}"  # nur Repo-Name ohne Owner
+
+    log "Deploying stack '$STACK_NAME' from github.com/$REPO ..."
+
+    # Prüfen ob Stack schon existiert → update vs. create
+    EXISTING_ID=$(curl -sf \
+        -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+        "${PORTAINER_URL}/api/stacks" \
+        | jq --arg name "$STACK_NAME" '.[] | select(.Name == $name) | .Id' 2>/dev/null || true)
+
+    if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
+        STACK_FILE=$(curl -sf \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            "${PORTAINER_URL}/api/stacks/${EXISTING_ID}/file" \
+            | jq -r '.StackFileContent')
+
+        curl -sf -X PUT \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/stacks/${EXISTING_ID}?endpointId=${ENDPOINT_ID}" \
+            -d "$(jq -n \
+                --arg content "$STACK_FILE" \
+                --argjson env "$ENV_JSON" \
+                '{stackFileContent: $content, env: $env, pullImage: true}')" > /dev/null
+        ok "Stack '$STACK_NAME' updated"
+    else
+        curl -sf -X POST \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/stacks/create/standalone/repository?endpointId=${ENDPOINT_ID}" \
+            -d "$(jq -n \
+                --arg name "$STACK_NAME" \
+                --arg repo "https://github.com/${REPO}" \
+                --arg token "$GITHUB_TOKEN" \
+                --argjson env "$ENV_JSON" \
+                '{
+                    name: $name,
+                    repositoryURL: $repo,
+                    repositoryReferenceName: "refs/heads/main",
+                    filePathInRepository: "docker-compose.yaml",
+                    repositoryAuthentication: true,
+                    repositoryUsername: "token",
+                    repositoryPassword: $token,
+                    env: $env
+                }')" > /dev/null
+        ok "Stack '$STACK_NAME' created and deployed"
+    fi
+done
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -177,9 +287,3 @@ echo -e "    Password : ${GREEN}${PORTAINER_PASSWORD}${NC}"
 echo ""
 echo -e "  ${YELLOW}⚠  Save these credentials — they won't be shown again.${NC}"
 echo ""
-if [ -f "$DEPLOY_CONFIG" ]; then
-echo -e "  ${BOLD}Deploy:${NC}"
-echo -e "    Config  → ${BLUE}${DEPLOY_CONFIG}${NC}"
-echo -e "    Run     → ${BLUE}./deploy.sh${NC}"
-echo ""
-fi
