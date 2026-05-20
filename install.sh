@@ -180,6 +180,6 @@ echo ""
 if [ -f "$DEPLOY_CONFIG" ]; then
 echo -e "  ${BOLD}Deploy:${NC}"
 echo -e "    Config  → ${BLUE}${DEPLOY_CONFIG}${NC}"
-echo -e "    Run     → ${BLUE}source ${DEPLOY_CONFIG} && ./deploy.sh${NC}"
+echo -e "    Run     → ${BLUE}./deploy.sh${NC}"
 echo ""
 fi
