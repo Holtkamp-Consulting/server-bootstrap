@@ -14,9 +14,15 @@ warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[✗]${NC} $*" >&2; }
 
 PORTAINER_ADMIN="admin"
-PORTAINER_PASSWORD=$(openssl rand -hex 10)
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
+
+DEPLOY_CONFIG="/etc/infisical-deploy.env"
+if [ -f "$DEPLOY_CONFIG" ] && grep -q '^PORTAINER_PASSWORD=' "$DEPLOY_CONFIG" 2>/dev/null; then
+    PORTAINER_PASSWORD=$(grep '^PORTAINER_PASSWORD=' "$DEPLOY_CONFIG" | cut -d'=' -f2-)
+else
+    PORTAINER_PASSWORD=$(openssl rand -hex 10)
+fi
 
 echo ""
 echo -e "${BOLD}${BLUE}╔══════════════════════════════════════════╗${NC}"
@@ -25,10 +31,16 @@ echo -e "${BOLD}${BLUE}╚══════════════════
 echo ""
 
 # ── Sudo precheck ──────────────────────────────────────────────────────────────
-# Prime sudo credentials early, before any installation steps
 log "Checking sudo access..."
 sudo -v || { err "sudo privileges required to run this script."; exit 1; }
 ok "sudo OK"
+
+# ── Dependencies ───────────────────────────────────────────────────────────────
+if ! command -v jq &>/dev/null; then
+    log "Installing jq..."
+    sudo apt-get install -y -qq jq >/dev/null
+    ok "jq installed"
+fi
 
 # ── 1. Docker ─────────────────────────────────────────────────────────────────
 log "Step 1/6 — Docker"
@@ -59,21 +71,20 @@ fi
 
 ${DOCKER} volume create portainer_data >/dev/null || true
 
-if ${DOCKER} ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^portainer$'; then
-    warn "Removing existing Portainer container..."
-    ${DOCKER} rm -f portainer >/dev/null
+if ${DOCKER} ps --format '{{.Names}}' 2>/dev/null | grep -q '^portainer$'; then
+    ok "Portainer already running — skipping"
+else
+    ${DOCKER} rm -f portainer >/dev/null 2>&1 || true
+    ${DOCKER} run -d \
+        --name portainer \
+        --restart=always \
+        -p "${PORTAINER_PORT_HTTP}:9000" \
+        -p "${PORTAINER_PORT_HTTPS}:9443" \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v portainer_data:/data \
+        portainer/portainer-ce:latest >/dev/null
+    ok "Portainer container started"
 fi
-
-${DOCKER} run -d \
-    --name portainer \
-    --restart=always \
-    -p "${PORTAINER_PORT_HTTP}:9000" \
-    -p "${PORTAINER_PORT_HTTPS}:9443" \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v portainer_data:/data \
-    portainer/portainer-ce:latest >/dev/null
-
-ok "Portainer container started"
 
 # ── 3. Credentials ─────────────────────────────────────────────────────────────
 log "Step 3/6 — Configuring admin credentials"
@@ -93,18 +104,16 @@ until curl -sf "${PORTAINER_API}/api/status" &>/dev/null; do
     elapsed=$((elapsed + 2))
 done
 
-RESPONSE=$(curl -sf -X POST \
+INIT_HTTP=$(curl -sf -o /dev/null -w "%{http_code}" -X POST \
     -H "Content-Type: application/json" \
     -d "{\"Username\":\"${PORTAINER_ADMIN}\",\"Password\":\"${PORTAINER_PASSWORD}\"}" \
-    "${PORTAINER_API}/api/users/admin/init" 2>&1)
+    "${PORTAINER_API}/api/users/admin/init" 2>/dev/null || echo "000")
 
-if echo "$RESPONSE" | grep -q '"Id"'; then
-    ok "Admin user configured"
-else
-    err "Failed to initialise admin user"
-    err "API response: ${RESPONSE}"
-    exit 1
-fi
+case "$INIT_HTTP" in
+    200|201) ok "Admin user configured" ;;
+    409)     ok "Admin user already initialised — skipping" ;;
+    *)       err "Failed to initialise admin user (HTTP ${INIT_HTTP})"; exit 1 ;;
+esac
 
 # ── 4. Infisical CLI ───────────────────────────────────────────────────────────
 log "Step 4/6 — Infisical CLI"
@@ -119,8 +128,6 @@ fi
 
 # ── 5. Credentials ────────────────────────────────────────────────────────────
 log "Step 5/6 — Infisical + GitHub credentials"
-
-DEPLOY_CONFIG="/etc/infisical-deploy.env"
 
 if [ -f "$DEPLOY_CONFIG" ]; then
     warn "Deploy config already exists at $DEPLOY_CONFIG — skipping credential setup"
@@ -153,6 +160,7 @@ INFISICAL_PROJECT_ID=${INF_PROJECT_ID}
 INFISICAL_ENV=${INF_ENV}
 INFISICAL_PATH=/
 PORTAINER_URL=http://localhost:${PORTAINER_PORT_HTTP}
+PORTAINER_PASSWORD=${PORTAINER_PASSWORD}
 PORTAINER_TOKEN=${PORTAINER_JWT}
 GITHUB_TOKEN=${GITHUB_TOKEN}
 EOF
@@ -163,6 +171,19 @@ fi
 
 # ── 6. Stacks deployen ─────────────────────────────────────────────────────────
 log "Step 6/6 — Stack deployment from GitHub"
+
+# Portainer JWT immer frisch holen (cached token kann abgelaufen sein)
+log "Refreshing Portainer API token..."
+PORTAINER_TOKEN=$(curl -sf -X POST \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${PORTAINER_ADMIN}\",\"password\":\"${PORTAINER_PASSWORD}\"}" \
+    "${PORTAINER_URL}/api/auth" | grep -o '"jwt":"[^"]*"' | cut -d'"' -f4)
+
+if [ -z "$PORTAINER_TOKEN" ]; then
+    err "Could not authenticate with Portainer — check credentials in $DEPLOY_CONFIG"
+    exit 1
+fi
+ok "Portainer token refreshed"
 
 # Portainer local endpoint ID
 ENDPOINT_ID=$(curl -sf \
@@ -203,17 +224,30 @@ INFISICAL_TOKEN=$(infisical login \
     --client-id="${INFISICAL_CLIENT_ID}" \
     --client-secret="${INFISICAL_CLIENT_SECRET}" \
     --domain="${INFISICAL_URL}" \
-    --plain --silent 2>/dev/null)
+    --plain 2>/dev/null)
 
-# Secrets als Portainer-Env-Array holen
-ENV_JSON=$(infisical secrets \
-    --token="${INFISICAL_TOKEN}" \
-    --projectId="${INFISICAL_PROJECT_ID}" \
-    --env="${INFISICAL_ENV}" \
-    --path="${INFISICAL_PATH}" \
-    --domain="${INFISICAL_URL}" \
-    --format=json --silent 2>/dev/null \
-    | jq '[.[] | {name: .secretKey, value: .secretValue}]')
+if [ -z "$INFISICAL_TOKEN" ]; then
+    err "Infisical authentication failed — check Client ID/Secret and URL"
+    exit 1
+fi
+ok "Infisical authenticated"
+
+# Alle Infisical-Projekte laden (für Namens-Lookup pro Stack)
+echo ""
+warn "Infisical Machine Identity access required"
+echo -e "  Pro Stack werden Secrets aus dem gleichnamigen Infisical-Projekt geladen."
+echo -e "  Die Machine Identity braucht dafür Zugriff auf jedes dieser Projekte:"
+echo -e ""
+echo -e "  ${BOLD}Infisical UI → Projekt wählen → Access Control →${NC}"
+echo -e "  ${BOLD}Machine Identities → Add Machine Identity to Project → Role: Viewer${NC}"
+echo -e ""
+echo -e "  Fehlt der Zugriff, wird für diesen Stack auf das konfigurierte"
+echo -e "  Default-Projekt (${YELLOW}${INFISICAL_PROJECT_ID}${NC}) zurückgefallen."
+echo ""
+
+WORKSPACES_JSON=$(curl -sf \
+    -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
+    "${INFISICAL_URL}/api/v1/workspace" 2>/dev/null || echo '{"workspaces":[]}')
 
 # Ausgewählte Repos deployen
 for NUM in $SELECTION; do
@@ -222,6 +256,27 @@ for NUM in $SELECTION; do
     STACK_NAME="${REPO##*/}"  # nur Repo-Name ohne Owner
 
     log "Deploying stack '$STACK_NAME' from github.com/$REPO ..."
+
+    # Infisical-Projekt mit gleichem Namen suchen, sonst Default
+    STACK_PROJECT_ID=$(echo "$WORKSPACES_JSON" \
+        | jq -r --arg name "$STACK_NAME" '.workspaces[] | select(.name == $name) | .id' 2>/dev/null)
+
+    if [ -n "$STACK_PROJECT_ID" ] && [ "$STACK_PROJECT_ID" != "null" ]; then
+        log "  Infisical project '$STACK_NAME' found (${STACK_PROJECT_ID})"
+    else
+        warn "  No Infisical project named '$STACK_NAME' — using default project"
+        STACK_PROJECT_ID="${INFISICAL_PROJECT_ID}"
+    fi
+
+    # Secrets für diesen Stack holen
+    ENV_JSON=$(infisical secrets \
+        --token="${INFISICAL_TOKEN}" \
+        --projectId="${STACK_PROJECT_ID}" \
+        --env="${INFISICAL_ENV}" \
+        --path="${INFISICAL_PATH}" \
+        --domain="${INFISICAL_URL}" \
+        --format=json 2>/dev/null \
+        | jq '[.[] | {name: .secretKey, value: .secretValue}]')
 
     # Prüfen ob Stack schon existiert → update vs. create
     EXISTING_ID=$(curl -sf \
