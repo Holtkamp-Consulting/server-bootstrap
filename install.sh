@@ -49,15 +49,13 @@ require_value() {
 PORTAINER_ADMIN="admin"
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
-
 DEPLOY_CONFIG="/etc/infisical-deploy.env"
-if [ -f "$DEPLOY_CONFIG" ] && grep -q '^PORTAINER_PASSWORD=' "$DEPLOY_CONFIG" 2>/dev/null; then
-    PORTAINER_PASSWORD_FROM_CONFIG=1
-    PORTAINER_PASSWORD=$(grep '^PORTAINER_PASSWORD=' "$DEPLOY_CONFIG" | cut -d'=' -f2-)
-else
-    PORTAINER_PASSWORD_FROM_CONFIG=0
-    PORTAINER_PASSWORD=$(openssl rand -hex 10)
-fi
+
+load_deploy_config() {
+    # The config is root-owned and mode 600 because it contains secrets.
+    # Read it through sudo instead of making it world-readable.
+    source <(sudo cat "$DEPLOY_CONFIG")
+}
 
 echo ""
 echo -e "${BOLD}${BLUE}╔══════════════════════════════════════════╗${NC}"
@@ -69,6 +67,13 @@ echo ""
 log "Checking sudo access..."
 sudo -v || { err "sudo privileges required to run this script."; exit 1; }
 ok "sudo OK"
+
+if [ -f "$DEPLOY_CONFIG" ] && load_deploy_config && [ -n "${PORTAINER_PASSWORD:-}" ]; then
+    PORTAINER_PASSWORD_FROM_CONFIG=1
+else
+    PORTAINER_PASSWORD_FROM_CONFIG=0
+    PORTAINER_PASSWORD=$(openssl rand -hex 10)
+fi
 
 # ── Dependencies ───────────────────────────────────────────────────────────────
 if ! command -v jq &>/dev/null; then
@@ -178,7 +183,7 @@ log "Step 5/6 — Infisical + GitHub credentials"
 
 if [ -f "$DEPLOY_CONFIG" ]; then
     warn "Deploy config already exists at $DEPLOY_CONFIG — skipping credential setup"
-    source "$DEPLOY_CONFIG"
+    load_deploy_config
 else
     log "Infisical Machine Identity: Infisical UI → Project → Access Control → Machine Identities → Create"
     echo ""
@@ -225,7 +230,7 @@ else
         printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
     } | sudo tee "$DEPLOY_CONFIG" > /dev/null
     sudo chmod 600 "$DEPLOY_CONFIG"
-    source "$DEPLOY_CONFIG"
+    load_deploy_config
     ok "Credentials saved to $DEPLOY_CONFIG"
 fi
 
