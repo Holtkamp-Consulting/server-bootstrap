@@ -13,14 +13,49 @@ ok()   { echo -e "${GREEN}[✓]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[✗]${NC} $*" >&2; }
 
+prompt_input() {
+    local prompt="$1"
+    local var_name="$2"
+
+    if [ -r /dev/tty ]; then
+        read -r -p "$prompt" "$var_name" < /dev/tty
+    else
+        read -r -p "$prompt" "$var_name"
+    fi
+}
+
+prompt_secret() {
+    local prompt="$1"
+    local var_name="$2"
+
+    if [ -r /dev/tty ]; then
+        read -r -s -p "$prompt" "$var_name" < /dev/tty
+    else
+        read -r -s -p "$prompt" "$var_name"
+    fi
+    echo ""
+}
+
+require_value() {
+    local value="$1"
+    local label="$2"
+
+    if [ -z "$value" ]; then
+        err "$label must not be empty"
+        exit 1
+    fi
+}
+
 PORTAINER_ADMIN="admin"
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
 
 DEPLOY_CONFIG="/etc/infisical-deploy.env"
 if [ -f "$DEPLOY_CONFIG" ] && grep -q '^PORTAINER_PASSWORD=' "$DEPLOY_CONFIG" 2>/dev/null; then
+    PORTAINER_PASSWORD_FROM_CONFIG=1
     PORTAINER_PASSWORD=$(grep '^PORTAINER_PASSWORD=' "$DEPLOY_CONFIG" | cut -d'=' -f2-)
 else
+    PORTAINER_PASSWORD_FROM_CONFIG=0
     PORTAINER_PASSWORD=$(openssl rand -hex 10)
 fi
 
@@ -104,14 +139,26 @@ until curl -sf "${PORTAINER_API}/api/status" &>/dev/null; do
     elapsed=$((elapsed + 2))
 done
 
+INIT_PAYLOAD=$(jq -n \
+    --arg username "$PORTAINER_ADMIN" \
+    --arg password "$PORTAINER_PASSWORD" \
+    '{Username: $username, Password: $password}')
+
 INIT_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
     -H "Content-Type: application/json" \
-    -d "{\"Username\":\"${PORTAINER_ADMIN}\",\"Password\":\"${PORTAINER_PASSWORD}\"}" \
+    -d "$INIT_PAYLOAD" \
     "${PORTAINER_API}/api/users/admin/init" 2>/dev/null || echo "000")
 
 case "$INIT_HTTP" in
     200|201) ok "Admin user configured" ;;
-    409)     ok "Admin user already initialised — skipping" ;;
+    409)
+        ok "Admin user already initialised — skipping"
+        if [ "$PORTAINER_PASSWORD_FROM_CONFIG" -eq 0 ]; then
+            warn "Existing Portainer admin password required for API access"
+            prompt_secret "  Portainer admin password:                  " PORTAINER_PASSWORD
+            require_value "$PORTAINER_PASSWORD" "Portainer admin password"
+        fi
+        ;;
     *)       err "Failed to initialise admin user (HTTP ${INIT_HTTP})"; exit 1 ;;
 esac
 
@@ -135,35 +182,48 @@ if [ -f "$DEPLOY_CONFIG" ]; then
 else
     log "Infisical Machine Identity: Infisical UI → Project → Access Control → Machine Identities → Create"
     echo ""
-    read -rp "  Infisical URL (e.g. http://mac-studio:80): " INF_URL
-    read -rp "  Client ID:                                  " INF_CLIENT_ID
-    read -rsp "  Client Secret:                              " INF_CLIENT_SECRET
-    echo ""
-    read -rp "  Project ID:                                 " INF_PROJECT_ID
-    read -rp "  Environment (prod/staging/dev):             " INF_ENV
+    prompt_input "  Infisical URL (e.g. http://mac-studio:80): " INF_URL
+    prompt_input "  Client ID:                                  " INF_CLIENT_ID
+    prompt_secret "  Client Secret:                              " INF_CLIENT_SECRET
+    prompt_input "  Project ID:                                 " INF_PROJECT_ID
+    prompt_input "  Environment (prod/staging/dev):             " INF_ENV
+    require_value "$INF_URL" "Infisical URL"
+    require_value "$INF_CLIENT_ID" "Infisical Client ID"
+    require_value "$INF_CLIENT_SECRET" "Infisical Client Secret"
+    require_value "$INF_PROJECT_ID" "Infisical Project ID"
+    require_value "$INF_ENV" "Infisical environment"
     echo ""
     log "GitHub Personal Access Token (needs repo scope):"
-    read -rsp "  GitHub Token: " GITHUB_TOKEN
-    echo ""
+    prompt_secret "  GitHub Token: " GITHUB_TOKEN
+    require_value "$GITHUB_TOKEN" "GitHub token"
 
     log "Fetching Portainer API token..."
+    AUTH_PAYLOAD=$(jq -n \
+        --arg username "$PORTAINER_ADMIN" \
+        --arg password "$PORTAINER_PASSWORD" \
+        '{username: $username, password: $password}')
     PORTAINER_JWT=$(curl -sf -X POST \
         -H "Content-Type: application/json" \
-        -d "{\"username\":\"${PORTAINER_ADMIN}\",\"password\":\"${PORTAINER_PASSWORD}\"}" \
-        "${PORTAINER_API}/api/auth" | grep -o '"jwt":"[^"]*"' | cut -d'"' -f4)
+        -d "$AUTH_PAYLOAD" \
+        "${PORTAINER_API}/api/auth" 2>/dev/null | jq -r '.jwt // empty' || true)
 
-    sudo tee "$DEPLOY_CONFIG" > /dev/null <<EOF
-INFISICAL_URL=${INF_URL}
-INFISICAL_CLIENT_ID=${INF_CLIENT_ID}
-INFISICAL_CLIENT_SECRET=${INF_CLIENT_SECRET}
-INFISICAL_PROJECT_ID=${INF_PROJECT_ID}
-INFISICAL_ENV=${INF_ENV}
-INFISICAL_PATH=/
-PORTAINER_URL=http://localhost:${PORTAINER_PORT_HTTP}
-PORTAINER_PASSWORD=${PORTAINER_PASSWORD}
-PORTAINER_TOKEN=${PORTAINER_JWT}
-GITHUB_TOKEN=${GITHUB_TOKEN}
-EOF
+    if [ -z "$PORTAINER_JWT" ]; then
+        err "Could not authenticate with Portainer — check the admin password"
+        exit 1
+    fi
+
+    {
+        printf 'INFISICAL_URL=%q\n' "$INF_URL"
+        printf 'INFISICAL_CLIENT_ID=%q\n' "$INF_CLIENT_ID"
+        printf 'INFISICAL_CLIENT_SECRET=%q\n' "$INF_CLIENT_SECRET"
+        printf 'INFISICAL_PROJECT_ID=%q\n' "$INF_PROJECT_ID"
+        printf 'INFISICAL_ENV=%q\n' "$INF_ENV"
+        printf 'INFISICAL_PATH=%q\n' "/"
+        printf 'PORTAINER_URL=%q\n' "http://localhost:${PORTAINER_PORT_HTTP}"
+        printf 'PORTAINER_PASSWORD=%q\n' "$PORTAINER_PASSWORD"
+        printf 'PORTAINER_TOKEN=%q\n' "$PORTAINER_JWT"
+        printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
+    } | sudo tee "$DEPLOY_CONFIG" > /dev/null
     sudo chmod 600 "$DEPLOY_CONFIG"
     source "$DEPLOY_CONFIG"
     ok "Credentials saved to $DEPLOY_CONFIG"
@@ -174,10 +234,14 @@ log "Step 6/6 — Stack deployment from GitHub"
 
 # Portainer JWT immer frisch holen (cached token kann abgelaufen sein)
 log "Refreshing Portainer API token..."
+AUTH_PAYLOAD=$(jq -n \
+    --arg username "$PORTAINER_ADMIN" \
+    --arg password "$PORTAINER_PASSWORD" \
+    '{username: $username, password: $password}')
 PORTAINER_TOKEN=$(curl -sf -X POST \
     -H "Content-Type: application/json" \
-    -d "{\"username\":\"${PORTAINER_ADMIN}\",\"password\":\"${PORTAINER_PASSWORD}\"}" \
-    "${PORTAINER_URL}/api/auth" | grep -o '"jwt":"[^"]*"' | cut -d'"' -f4)
+    -d "$AUTH_PAYLOAD" \
+    "${PORTAINER_URL}/api/auth" 2>/dev/null | jq -r '.jwt // empty' || true)
 
 if [ -z "$PORTAINER_TOKEN" ]; then
     err "Could not authenticate with Portainer — check credentials in $DEPLOY_CONFIG"
@@ -215,7 +279,8 @@ for i in "${!REPO_NAMES[@]}"; do
     printf "  [%2d] %s\n" "$((i+1))" "${REPO_NAMES[$i]}"
 done
 echo ""
-read -rp "  Select repos to deploy (space-separated numbers, e.g. 1 3): " SELECTION
+prompt_input "  Select repos to deploy (space-separated numbers, e.g. 1 3): " SELECTION
+require_value "$SELECTION" "Repository selection"
 
 # Infisical-Token holen
 log "Authenticating with Infisical..."
