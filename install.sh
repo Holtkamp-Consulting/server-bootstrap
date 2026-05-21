@@ -266,15 +266,46 @@ fi
 
 # GitHub repos auflisten
 log "Fetching GitHub repositories..."
-REPOS_JSON=$(curl -sf \
-    -H "Authorization: token ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner")
+REPOS_JSON="[]"
+REPOS_PAGE=1
+while true; do
+    REPOS_RESPONSE_FILE=$(mktemp)
+    REPOS_HTTP=$(curl -sS -L \
+        -o "$REPOS_RESPONSE_FILE" \
+        -w "%{http_code}" \
+        -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/user/repos?per_page=100&page=${REPOS_PAGE}&sort=updated&affiliation=owner,collaborator,organization_member")
+    REPOS_PAGE_JSON=$(cat "$REPOS_RESPONSE_FILE")
+    rm -f "$REPOS_RESPONSE_FILE"
+
+    case "$REPOS_HTTP" in
+        200) ;;
+        *)
+            GITHUB_ERROR=$(echo "$REPOS_PAGE_JSON" | jq -r '.message // empty' 2>/dev/null || true)
+            err "Could not fetch GitHub repositories (HTTP ${REPOS_HTTP})"
+            if [ -n "$GITHUB_ERROR" ]; then
+                err "GitHub API: ${GITHUB_ERROR}"
+            fi
+            err "Check that GITHUB_TOKEN in $DEPLOY_CONFIG is valid and has repository access"
+            exit 1
+            ;;
+    esac
+
+    PAGE_COUNT=$(echo "$REPOS_PAGE_JSON" | jq 'length')
+    REPOS_JSON=$(jq -s 'add' <(echo "$REPOS_JSON") <(echo "$REPOS_PAGE_JSON"))
+
+    if [ "$PAGE_COUNT" -lt 100 ]; then
+        break
+    fi
+    REPOS_PAGE=$((REPOS_PAGE + 1))
+done
 
 mapfile -t REPO_NAMES < <(echo "$REPOS_JSON" | jq -r '.[].full_name')
 
 if [ ${#REPO_NAMES[@]} -eq 0 ]; then
     err "No repositories found for this token"
+    err "The token must be able to list owner, collaborator, or organization-member repositories"
     exit 1
 fi
 
