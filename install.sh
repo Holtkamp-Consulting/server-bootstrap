@@ -1,10 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# When piped via curl | bash, stdin is the script itself — redirect to terminal
-# so read prompts work correctly
-exec </dev/tty
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

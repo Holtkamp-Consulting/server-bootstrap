@@ -5,7 +5,7 @@ One-liner setup script for Raspberry Pi and other Linux servers. Installs Docker
 ## Usage
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/install.sh -o install.sh && bash install.sh
 ```
 
 During installation you will be prompted to enter an admin username. The password is generated automatically and displayed at the end.
