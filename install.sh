@@ -259,7 +259,8 @@ for NUM in $SELECTION; do
 
     # Infisical-Projekt mit gleichem Namen suchen, sonst Default
     STACK_PROJECT_ID=$(echo "$WORKSPACES_JSON" \
-        | jq -r --arg name "$STACK_NAME" '.workspaces[] | select(.name == $name) | .id' 2>/dev/null)
+        | jq -r --arg name "$STACK_NAME" \
+        '.workspaces[] | select(.name | ascii_downcase == ($name | ascii_downcase)) | .id' 2>/dev/null)
 
     if [ -n "$STACK_PROJECT_ID" ] && [ "$STACK_PROJECT_ID" != "null" ]; then
         log "  Infisical project '$STACK_NAME' found (${STACK_PROJECT_ID})"
