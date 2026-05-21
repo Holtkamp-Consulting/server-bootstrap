@@ -104,7 +104,7 @@ until curl -sf "${PORTAINER_API}/api/status" &>/dev/null; do
     elapsed=$((elapsed + 2))
 done
 
-INIT_HTTP=$(curl -sf -o /dev/null -w "%{http_code}" -X POST \
+INIT_HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
     -H "Content-Type: application/json" \
     -d "{\"Username\":\"${PORTAINER_ADMIN}\",\"Password\":\"${PORTAINER_PASSWORD}\"}" \
     "${PORTAINER_API}/api/users/admin/init" 2>/dev/null || echo "000")
