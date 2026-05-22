@@ -419,30 +419,27 @@ for i in "${!DEPLOY_REPOS[@]}"; do
 
     # Secrets für diesen Stack holen
     log "  Fetching Infisical secrets for env '${INFISICAL_ENV}' path '${INFISICAL_PATH}'"
-    SECRETS_OUTPUT_FILE=$(mktemp)
-    SECRETS_ERROR_FILE=$(mktemp)
-    if ! infisical secrets \
-        --token="${INFISICAL_TOKEN}" \
-        --projectId="${STACK_PROJECT_ID}" \
-        --env="${INFISICAL_ENV}" \
-        --path="${INFISICAL_PATH}" \
-        --domain="${INFISICAL_URL}" \
-        --format=json > "$SECRETS_OUTPUT_FILE" 2> "$SECRETS_ERROR_FILE"; then
-        err "Failed to fetch Infisical secrets for stack '$STACK_NAME'"
+    PROJECT_ID_QUERY=$(jq -nr --arg value "$STACK_PROJECT_ID" '$value | @uri')
+    ENV_QUERY=$(jq -nr --arg value "$INFISICAL_ENV" '$value | @uri')
+    PATH_QUERY=$(jq -nr --arg value "$INFISICAL_PATH" '$value | @uri')
+    SECRETS_RESPONSE=$(fetch_infisical_api "${INFISICAL_API_BASE}/api/v4/secrets?projectId=${PROJECT_ID_QUERY}&environment=${ENV_QUERY}&secretPath=${PATH_QUERY}&viewSecretValue=true&includeImports=true")
+    SECRETS_HTTP=$(printf '%s\n' "$SECRETS_RESPONSE" | sed -n '1p')
+    SECRETS_JSON=$(printf '%s\n' "$SECRETS_RESPONSE" | sed '1d')
+
+    if [ "$SECRETS_HTTP" != "200" ] || ! echo "$SECRETS_JSON" | jq -e '.secrets | type == "array"' >/dev/null 2>&1; then
+        err "Failed to fetch Infisical secrets for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP})"
         err "Project: ${STACK_PROJECT_NAME} (${STACK_PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
-        err "$(head -c 500 "$SECRETS_ERROR_FILE")"
-        rm -f "$SECRETS_OUTPUT_FILE" "$SECRETS_ERROR_FILE"
+        err "$(echo "$SECRETS_JSON" | head -c 500)"
         exit 1
     fi
 
-    if ! ENV_JSON=$(jq '[.[] | {name: .secretKey, value: .secretValue}]' "$SECRETS_OUTPUT_FILE" 2> "$SECRETS_ERROR_FILE"); then
-        err "Infisical secrets output was not valid JSON for stack '$STACK_NAME'"
-        err "$(head -c 500 "$SECRETS_ERROR_FILE")"
-        err "$(head -c 500 "$SECRETS_OUTPUT_FILE")"
-        rm -f "$SECRETS_OUTPUT_FILE" "$SECRETS_ERROR_FILE"
-        exit 1
-    fi
-    rm -f "$SECRETS_OUTPUT_FILE" "$SECRETS_ERROR_FILE"
+    ENV_JSON=$(echo "$SECRETS_JSON" \
+        | jq '[
+            ((.imports // []) | .[].secrets[]?),
+            (.secrets // [])[]
+        ] | reduce .[] as $secret ({};
+            .[$secret.secretKey] = $secret.secretValue
+        ) | to_entries | map({name: .key, value: .value})')
     ok "  Loaded $(echo "$ENV_JSON" | jq 'length') secret(s)"
 
     # Prüfen ob Stack schon existiert → update vs. create
