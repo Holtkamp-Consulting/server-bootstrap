@@ -418,14 +418,32 @@ for i in "${!DEPLOY_REPOS[@]}"; do
     log "  Using matched Infisical project '$STACK_PROJECT_NAME' (${STACK_PROJECT_ID})"
 
     # Secrets für diesen Stack holen
-    ENV_JSON=$(infisical secrets \
+    log "  Fetching Infisical secrets for env '${INFISICAL_ENV}' path '${INFISICAL_PATH}'"
+    SECRETS_OUTPUT_FILE=$(mktemp)
+    SECRETS_ERROR_FILE=$(mktemp)
+    if ! infisical secrets \
         --token="${INFISICAL_TOKEN}" \
         --projectId="${STACK_PROJECT_ID}" \
         --env="${INFISICAL_ENV}" \
         --path="${INFISICAL_PATH}" \
         --domain="${INFISICAL_URL}" \
-        --format=json 2>/dev/null \
-        | jq '[.[] | {name: .secretKey, value: .secretValue}]')
+        --format=json > "$SECRETS_OUTPUT_FILE" 2> "$SECRETS_ERROR_FILE"; then
+        err "Failed to fetch Infisical secrets for stack '$STACK_NAME'"
+        err "Project: ${STACK_PROJECT_NAME} (${STACK_PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
+        err "$(head -c 500 "$SECRETS_ERROR_FILE")"
+        rm -f "$SECRETS_OUTPUT_FILE" "$SECRETS_ERROR_FILE"
+        exit 1
+    fi
+
+    if ! ENV_JSON=$(jq '[.[] | {name: .secretKey, value: .secretValue}]' "$SECRETS_OUTPUT_FILE" 2> "$SECRETS_ERROR_FILE"); then
+        err "Infisical secrets output was not valid JSON for stack '$STACK_NAME'"
+        err "$(head -c 500 "$SECRETS_ERROR_FILE")"
+        err "$(head -c 500 "$SECRETS_OUTPUT_FILE")"
+        rm -f "$SECRETS_OUTPUT_FILE" "$SECRETS_ERROR_FILE"
+        exit 1
+    fi
+    rm -f "$SECRETS_OUTPUT_FILE" "$SECRETS_ERROR_FILE"
+    ok "  Loaded $(echo "$ENV_JSON" | jq 'length') secret(s)"
 
     # Prüfen ob Stack schon existiert → update vs. create
     EXISTING_ID=$(curl -sf \
@@ -439,17 +457,31 @@ for i in "${!DEPLOY_REPOS[@]}"; do
             "${PORTAINER_URL}/api/stacks/${EXISTING_ID}/file" \
             | jq -r '.StackFileContent')
 
-        curl -sf -X PUT \
+        PORTAINER_RESPONSE_FILE=$(mktemp)
+        PORTAINER_HTTP=$(curl -sS -X PUT \
+            -o "$PORTAINER_RESPONSE_FILE" \
+            -w "%{http_code}" \
             -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
             -H "Content-Type: application/json" \
             "${PORTAINER_URL}/api/stacks/${EXISTING_ID}?endpointId=${ENDPOINT_ID}" \
             -d "$(jq -n \
                 --arg content "$STACK_FILE" \
                 --argjson env "$ENV_JSON" \
-                '{stackFileContent: $content, env: $env, pullImage: true}')" > /dev/null
+                '{stackFileContent: $content, env: $env, pullImage: true}')" 2>/dev/null || true)
+        PORTAINER_HTTP="${PORTAINER_HTTP:-000}"
+        if [ "$PORTAINER_HTTP" -lt 200 ] || [ "$PORTAINER_HTTP" -ge 300 ]; then
+            err "Failed to update Portainer stack '$STACK_NAME' (HTTP ${PORTAINER_HTTP})"
+            err "$(head -c 500 "$PORTAINER_RESPONSE_FILE")"
+            rm -f "$PORTAINER_RESPONSE_FILE"
+            exit 1
+        fi
+        rm -f "$PORTAINER_RESPONSE_FILE"
         ok "Stack '$STACK_NAME' updated"
     else
-        curl -sf -X POST \
+        PORTAINER_RESPONSE_FILE=$(mktemp)
+        PORTAINER_HTTP=$(curl -sS -X POST \
+            -o "$PORTAINER_RESPONSE_FILE" \
+            -w "%{http_code}" \
             -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
             -H "Content-Type: application/json" \
             "${PORTAINER_URL}/api/stacks/create/standalone/repository?endpointId=${ENDPOINT_ID}" \
@@ -467,7 +499,15 @@ for i in "${!DEPLOY_REPOS[@]}"; do
                     repositoryUsername: "token",
                     repositoryPassword: $token,
                     env: $env
-                }')" > /dev/null
+                }')" 2>/dev/null || true)
+        PORTAINER_HTTP="${PORTAINER_HTTP:-000}"
+        if [ "$PORTAINER_HTTP" -lt 200 ] || [ "$PORTAINER_HTTP" -ge 300 ]; then
+            err "Failed to create Portainer stack '$STACK_NAME' (HTTP ${PORTAINER_HTTP})"
+            err "$(head -c 500 "$PORTAINER_RESPONSE_FILE")"
+            rm -f "$PORTAINER_RESPONSE_FILE"
+            exit 1
+        fi
+        rm -f "$PORTAINER_RESPONSE_FILE"
         ok "Stack '$STACK_NAME' created and deployed"
     fi
 done
