@@ -190,12 +190,10 @@ else
     prompt_input "  Infisical URL (e.g. http://mac-studio:80): " INF_URL
     prompt_input "  Client ID:                                  " INF_CLIENT_ID
     prompt_secret "  Client Secret:                              " INF_CLIENT_SECRET
-    prompt_input "  Project ID:                                 " INF_PROJECT_ID
     prompt_input "  Environment (prod/staging/dev):             " INF_ENV
     require_value "$INF_URL" "Infisical URL"
     require_value "$INF_CLIENT_ID" "Infisical Client ID"
     require_value "$INF_CLIENT_SECRET" "Infisical Client Secret"
-    require_value "$INF_PROJECT_ID" "Infisical Project ID"
     require_value "$INF_ENV" "Infisical environment"
     echo ""
     log "GitHub Personal Access Token (needs repo scope):"
@@ -221,7 +219,6 @@ else
         printf 'INFISICAL_URL=%q\n' "$INF_URL"
         printf 'INFISICAL_CLIENT_ID=%q\n' "$INF_CLIENT_ID"
         printf 'INFISICAL_CLIENT_SECRET=%q\n' "$INF_CLIENT_SECRET"
-        printf 'INFISICAL_PROJECT_ID=%q\n' "$INF_PROJECT_ID"
         printf 'INFISICAL_ENV=%q\n' "$INF_ENV"
         printf 'INFISICAL_PATH=%q\n' "/"
         printf 'PORTAINER_URL=%q\n' "http://localhost:${PORTAINER_PORT_HTTP}"
@@ -353,38 +350,15 @@ fetch_infisical_api() {
 PROJECTS_RESPONSE=$(fetch_infisical_api "${INFISICAL_API_BASE}/api/v1/projects")
 PROJECTS_HTTP=$(printf '%s\n' "$PROJECTS_RESPONSE" | sed -n '1p')
 PROJECTS_JSON=$(printf '%s\n' "$PROJECTS_RESPONSE" | sed '1d')
-PROJECTS_SOURCE="/api/v1/projects"
 
-if [ "$PROJECTS_HTTP" = "200" ] && echo "$PROJECTS_JSON" | jq -e '.projects | type == "array"' >/dev/null 2>&1; then
-    mapfile -t PROJECT_ROWS < <(echo "$PROJECTS_JSON" | jq -r '.projects[] | [.name, .id] | @tsv')
-else
-    warn "Project list endpoint ${PROJECTS_SOURCE} did not return a projects array — trying organization workspace endpoint"
-
-    DEFAULT_PROJECT_RESPONSE=$(fetch_infisical_api "${INFISICAL_API_BASE}/api/v1/projects/${INFISICAL_PROJECT_ID}")
-    DEFAULT_PROJECT_HTTP=$(printf '%s\n' "$DEFAULT_PROJECT_RESPONSE" | sed -n '1p')
-    DEFAULT_PROJECT_JSON=$(printf '%s\n' "$DEFAULT_PROJECT_RESPONSE" | sed '1d')
-
-    if [ "$DEFAULT_PROJECT_HTTP" != "200" ] || ! echo "$DEFAULT_PROJECT_JSON" | jq -e '.project.orgId // empty' >/dev/null 2>&1; then
-        err "Could not determine Infisical organization from project ${INFISICAL_PROJECT_ID}"
-        err "GET /api/v1/projects returned HTTP ${PROJECTS_HTTP}: $(echo "$PROJECTS_JSON" | head -c 300)"
-        err "GET /api/v1/projects/${INFISICAL_PROJECT_ID} returned HTTP ${DEFAULT_PROJECT_HTTP}: $(echo "$DEFAULT_PROJECT_JSON" | head -c 300)"
-        exit 1
-    fi
-
-    INFISICAL_ORG_ID=$(echo "$DEFAULT_PROJECT_JSON" | jq -r '.project.orgId')
-    WORKSPACES_RESPONSE=$(fetch_infisical_api "${INFISICAL_API_BASE}/api/v2/organizations/${INFISICAL_ORG_ID}/workspaces")
-    WORKSPACES_HTTP=$(printf '%s\n' "$WORKSPACES_RESPONSE" | sed -n '1p')
-    WORKSPACES_JSON=$(printf '%s\n' "$WORKSPACES_RESPONSE" | sed '1d')
-
-    if [ "$WORKSPACES_HTTP" != "200" ] || ! echo "$WORKSPACES_JSON" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
-        err "Could not fetch Infisical workspaces for organization ${INFISICAL_ORG_ID}"
-        err "GET /api/v2/organizations/${INFISICAL_ORG_ID}/workspaces returned HTTP ${WORKSPACES_HTTP}: $(echo "$WORKSPACES_JSON" | head -c 300)"
-        exit 1
-    fi
-
-    PROJECTS_SOURCE="/api/v2/organizations/${INFISICAL_ORG_ID}/workspaces"
-    mapfile -t PROJECT_ROWS < <(echo "$WORKSPACES_JSON" | jq -r '.workspaces[] | [.name, .id] | @tsv')
+if [ "$PROJECTS_HTTP" != "200" ] || ! echo "$PROJECTS_JSON" | jq -e '.projects | type == "array"' >/dev/null 2>&1; then
+    err "Could not fetch Infisical projects from ${INFISICAL_API_BASE}/api/v1/projects"
+    err "This endpoint must return the Machine Identity's authorized projects as a JSON projects array."
+    err "HTTP ${PROJECTS_HTTP}: $(echo "$PROJECTS_JSON" | head -c 300)"
+    exit 1
 fi
+
+mapfile -t PROJECT_ROWS < <(echo "$PROJECTS_JSON" | jq -r '.projects[] | [.name, .id] | @tsv')
 
 if [ ${#PROJECT_ROWS[@]} -eq 0 ]; then
     err "No Infisical projects visible to this Machine Identity"
@@ -392,7 +366,7 @@ if [ ${#PROJECT_ROWS[@]} -eq 0 ]; then
     exit 1
 fi
 
-ok "Found ${#PROJECT_ROWS[@]} Infisical projects via ${PROJECTS_SOURCE}"
+ok "Found ${#PROJECT_ROWS[@]} Infisical projects"
 
 declare -A REPOS_BY_STACK_NAME=()
 for REPO in "${REPO_NAMES[@]}"; do
@@ -408,14 +382,17 @@ done
 DEPLOY_REPOS=()
 DEPLOY_PROJECT_IDS=()
 DEPLOY_STACK_NAMES=()
+DEPLOY_PROJECT_NAMES=()
 
 for ROW in "${PROJECT_ROWS[@]}"; do
     IFS=$'\t' read -r PROJECT_NAME PROJECT_ID <<< "$ROW"
     STACK_KEY="${PROJECT_NAME,,}"
     if [ -n "${REPOS_BY_STACK_NAME[$STACK_KEY]:-}" ]; then
-        DEPLOY_REPOS+=("${REPOS_BY_STACK_NAME[$STACK_KEY]}")
+        REPO="${REPOS_BY_STACK_NAME[$STACK_KEY]}"
+        DEPLOY_REPOS+=("$REPO")
         DEPLOY_PROJECT_IDS+=("$PROJECT_ID")
-        DEPLOY_STACK_NAMES+=("$PROJECT_NAME")
+        DEPLOY_STACK_NAMES+=("${REPO##*/}")
+        DEPLOY_PROJECT_NAMES+=("$PROJECT_NAME")
     else
         warn "No GitHub repository found for Infisical project '$PROJECT_NAME' — skipping"
     fi
@@ -435,9 +412,10 @@ for i in "${!DEPLOY_REPOS[@]}"; do
     REPO="${DEPLOY_REPOS[$i]}"
     STACK_PROJECT_ID="${DEPLOY_PROJECT_IDS[$i]}"
     STACK_NAME="${DEPLOY_STACK_NAMES[$i]}"
+    STACK_PROJECT_NAME="${DEPLOY_PROJECT_NAMES[$i]}"
 
     log "Deploying stack '$STACK_NAME' from github.com/$REPO ..."
-    log "  Using Infisical project '$STACK_NAME' (${STACK_PROJECT_ID})"
+    log "  Using matched Infisical project '$STACK_PROJECT_NAME' (${STACK_PROJECT_ID})"
 
     # Secrets für diesen Stack holen
     ENV_JSON=$(infisical secrets \

@@ -34,6 +34,8 @@ PORTAINER_PORT_HTTP=9000 PORTAINER_PORT_HTTPS=9443 bash install.sh
 
 Credentials are stored in `/etc/infisical-deploy.env` with mode `600`. Re-running the installer reuses this config.
 
+No Infisical project ID is configured manually. The configured Infisical URL must expose the API endpoint `/api/v1/projects` for the Machine Identity token.
+
 ## Stack deployment
 
 The installer deploys every GitHub repository whose repository name matches an Infisical project visible to the configured Machine Identity. Project matching is case-insensitive.
