@@ -330,34 +330,61 @@ ok "Infisical authenticated"
 echo ""
 log "Fetching Infisical projects available to the Machine Identity..."
 
-PROJECTS_RESPONSE_FILE=$(mktemp)
-PROJECTS_HTTP=$(curl -sS \
-    -o "$PROJECTS_RESPONSE_FILE" \
-    -w "%{http_code}" \
-    -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
-    "${INFISICAL_URL}/api/v1/projects" 2>/dev/null || echo "000")
-PROJECTS_JSON=$(cat "$PROJECTS_RESPONSE_FILE")
-rm -f "$PROJECTS_RESPONSE_FILE"
+INFISICAL_API_BASE="${INFISICAL_URL%/}"
 
-if [ "$PROJECTS_HTTP" != "200" ]; then
-    INFISICAL_ERROR=$(echo "$PROJECTS_JSON" | jq -r '.message // .error // empty' 2>/dev/null || true)
-    err "Could not fetch Infisical projects (HTTP ${PROJECTS_HTTP})"
-    if [ -n "$INFISICAL_ERROR" ]; then
-        err "Infisical API: ${INFISICAL_ERROR}"
-    else
-        err "Infisical API response was not JSON:"
-        err "$(echo "$PROJECTS_JSON" | head -c 300)"
+fetch_infisical_api() {
+    local url="$1"
+    local response_file
+    local http_code
+
+    response_file=$(mktemp)
+    http_code=$(curl -sS \
+        -o "$response_file" \
+        -w "%{http_code}" \
+        -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
+        "$url" 2>/dev/null || true)
+    http_code="${http_code:-000}"
+
+    printf '%s\n' "$http_code"
+    cat "$response_file"
+    rm -f "$response_file"
+}
+
+PROJECTS_RESPONSE=$(fetch_infisical_api "${INFISICAL_API_BASE}/api/v1/projects")
+PROJECTS_HTTP=$(printf '%s\n' "$PROJECTS_RESPONSE" | sed -n '1p')
+PROJECTS_JSON=$(printf '%s\n' "$PROJECTS_RESPONSE" | sed '1d')
+PROJECTS_SOURCE="/api/v1/projects"
+
+if [ "$PROJECTS_HTTP" = "200" ] && echo "$PROJECTS_JSON" | jq -e '.projects | type == "array"' >/dev/null 2>&1; then
+    mapfile -t PROJECT_ROWS < <(echo "$PROJECTS_JSON" | jq -r '.projects[] | [.name, .id] | @tsv')
+else
+    warn "Project list endpoint ${PROJECTS_SOURCE} did not return a projects array — trying organization workspace endpoint"
+
+    DEFAULT_PROJECT_RESPONSE=$(fetch_infisical_api "${INFISICAL_API_BASE}/api/v1/projects/${INFISICAL_PROJECT_ID}")
+    DEFAULT_PROJECT_HTTP=$(printf '%s\n' "$DEFAULT_PROJECT_RESPONSE" | sed -n '1p')
+    DEFAULT_PROJECT_JSON=$(printf '%s\n' "$DEFAULT_PROJECT_RESPONSE" | sed '1d')
+
+    if [ "$DEFAULT_PROJECT_HTTP" != "200" ] || ! echo "$DEFAULT_PROJECT_JSON" | jq -e '.project.orgId // empty' >/dev/null 2>&1; then
+        err "Could not determine Infisical organization from project ${INFISICAL_PROJECT_ID}"
+        err "GET /api/v1/projects returned HTTP ${PROJECTS_HTTP}: $(echo "$PROJECTS_JSON" | head -c 300)"
+        err "GET /api/v1/projects/${INFISICAL_PROJECT_ID} returned HTTP ${DEFAULT_PROJECT_HTTP}: $(echo "$DEFAULT_PROJECT_JSON" | head -c 300)"
+        exit 1
     fi
-    exit 1
-fi
 
-if ! echo "$PROJECTS_JSON" | jq -e '.projects | type == "array"' >/dev/null 2>&1; then
-    err "Infisical projects response did not contain a projects array"
-    err "$(echo "$PROJECTS_JSON" | head -c 300)"
-    exit 1
-fi
+    INFISICAL_ORG_ID=$(echo "$DEFAULT_PROJECT_JSON" | jq -r '.project.orgId')
+    WORKSPACES_RESPONSE=$(fetch_infisical_api "${INFISICAL_API_BASE}/api/v2/organizations/${INFISICAL_ORG_ID}/workspaces")
+    WORKSPACES_HTTP=$(printf '%s\n' "$WORKSPACES_RESPONSE" | sed -n '1p')
+    WORKSPACES_JSON=$(printf '%s\n' "$WORKSPACES_RESPONSE" | sed '1d')
 
-mapfile -t PROJECT_ROWS < <(echo "$PROJECTS_JSON" | jq -r '.projects[] | [.name, .id] | @tsv')
+    if [ "$WORKSPACES_HTTP" != "200" ] || ! echo "$WORKSPACES_JSON" | jq -e '.workspaces | type == "array"' >/dev/null 2>&1; then
+        err "Could not fetch Infisical workspaces for organization ${INFISICAL_ORG_ID}"
+        err "GET /api/v2/organizations/${INFISICAL_ORG_ID}/workspaces returned HTTP ${WORKSPACES_HTTP}: $(echo "$WORKSPACES_JSON" | head -c 300)"
+        exit 1
+    fi
+
+    PROJECTS_SOURCE="/api/v2/organizations/${INFISICAL_ORG_ID}/workspaces"
+    mapfile -t PROJECT_ROWS < <(echo "$WORKSPACES_JSON" | jq -r '.workspaces[] | [.name, .id] | @tsv')
+fi
 
 if [ ${#PROJECT_ROWS[@]} -eq 0 ]; then
     err "No Infisical projects visible to this Machine Identity"
@@ -365,7 +392,7 @@ if [ ${#PROJECT_ROWS[@]} -eq 0 ]; then
     exit 1
 fi
 
-ok "Found ${#PROJECT_ROWS[@]} Infisical projects"
+ok "Found ${#PROJECT_ROWS[@]} Infisical projects via ${PROJECTS_SOURCE}"
 
 declare -A REPOS_BY_STACK_NAME=()
 for REPO in "${REPO_NAMES[@]}"; do
