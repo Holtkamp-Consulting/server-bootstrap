@@ -309,14 +309,7 @@ if [ ${#REPO_NAMES[@]} -eq 0 ]; then
     exit 1
 fi
 
-echo ""
-log "Available repositories:"
-for i in "${!REPO_NAMES[@]}"; do
-    printf "  [%2d] %s\n" "$((i+1))" "${REPO_NAMES[$i]}"
-done
-echo ""
-prompt_input "  Select repos to deploy (space-separated numbers, e.g. 1 3): " SELECTION
-require_value "$SELECTION" "Repository selection"
+ok "Found ${#REPO_NAMES[@]} GitHub repositories"
 
 # Infisical-Token holen
 log "Authenticating with Infisical..."
@@ -333,42 +326,68 @@ if [ -z "$INFISICAL_TOKEN" ]; then
 fi
 ok "Infisical authenticated"
 
-# Alle Infisical-Projekte laden (für Namens-Lookup pro Stack)
+# Alle Infisical-Projekte laden, auf die die Machine Identity Zugriff hat.
 echo ""
-warn "Infisical Machine Identity access required"
-echo -e "  Pro Stack werden Secrets aus dem gleichnamigen Infisical-Projekt geladen."
-echo -e "  Die Machine Identity braucht dafür Zugriff auf jedes dieser Projekte:"
-echo -e ""
-echo -e "  ${BOLD}Infisical UI → Projekt wählen → Access Control →${NC}"
-echo -e "  ${BOLD}Machine Identities → Add Machine Identity to Project → Role: Viewer${NC}"
-echo -e ""
-echo -e "  Fehlt der Zugriff, wird für diesen Stack auf das konfigurierte"
-echo -e "  Default-Projekt (${YELLOW}${INFISICAL_PROJECT_ID}${NC}) zurückgefallen."
-echo ""
+log "Fetching Infisical projects available to the Machine Identity..."
 
 WORKSPACES_JSON=$(curl -sf \
     -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
     "${INFISICAL_URL}/api/v1/workspace" 2>/dev/null || echo '{"workspaces":[]}')
 
-# Ausgewählte Repos deployen
-for NUM in $SELECTION; do
-    IDX=$((NUM - 1))
-    REPO="${REPO_NAMES[$IDX]}"
-    STACK_NAME="${REPO##*/}"  # nur Repo-Name ohne Owner
+mapfile -t WORKSPACE_ROWS < <(echo "$WORKSPACES_JSON" | jq -r '.workspaces[] | [.name, .id] | @tsv')
+
+if [ ${#WORKSPACE_ROWS[@]} -eq 0 ]; then
+    err "No Infisical projects visible to this Machine Identity"
+    err "Add the Machine Identity to each project that should be deployed"
+    exit 1
+fi
+
+ok "Found ${#WORKSPACE_ROWS[@]} Infisical projects"
+
+declare -A REPOS_BY_STACK_NAME=()
+for REPO in "${REPO_NAMES[@]}"; do
+    STACK_NAME="${REPO##*/}"
+    STACK_KEY="${STACK_NAME,,}"
+    if [ -n "${REPOS_BY_STACK_NAME[$STACK_KEY]:-}" ]; then
+        warn "Multiple GitHub repositories named '$STACK_NAME' found — using ${REPOS_BY_STACK_NAME[$STACK_KEY]}"
+        continue
+    fi
+    REPOS_BY_STACK_NAME[$STACK_KEY]="$REPO"
+done
+
+DEPLOY_REPOS=()
+DEPLOY_PROJECT_IDS=()
+DEPLOY_STACK_NAMES=()
+
+for ROW in "${WORKSPACE_ROWS[@]}"; do
+    IFS=$'\t' read -r PROJECT_NAME PROJECT_ID <<< "$ROW"
+    STACK_KEY="${PROJECT_NAME,,}"
+    if [ -n "${REPOS_BY_STACK_NAME[$STACK_KEY]:-}" ]; then
+        DEPLOY_REPOS+=("${REPOS_BY_STACK_NAME[$STACK_KEY]}")
+        DEPLOY_PROJECT_IDS+=("$PROJECT_ID")
+        DEPLOY_STACK_NAMES+=("$PROJECT_NAME")
+    else
+        warn "No GitHub repository found for Infisical project '$PROJECT_NAME' — skipping"
+    fi
+done
+
+if [ ${#DEPLOY_REPOS[@]} -eq 0 ]; then
+    err "No deployable stacks found"
+    err "GitHub repository names must match Infisical project names"
+    exit 1
+fi
+
+echo ""
+log "Deploying ${#DEPLOY_REPOS[@]} stack(s) authorized by the Infisical Machine Identity"
+
+# Repos deployen, für die ein gleichnamiges Infisical-Projekt sichtbar ist.
+for i in "${!DEPLOY_REPOS[@]}"; do
+    REPO="${DEPLOY_REPOS[$i]}"
+    STACK_PROJECT_ID="${DEPLOY_PROJECT_IDS[$i]}"
+    STACK_NAME="${DEPLOY_STACK_NAMES[$i]}"
 
     log "Deploying stack '$STACK_NAME' from github.com/$REPO ..."
-
-    # Infisical-Projekt mit gleichem Namen suchen, sonst Default
-    STACK_PROJECT_ID=$(echo "$WORKSPACES_JSON" \
-        | jq -r --arg name "$STACK_NAME" \
-        '.workspaces[] | select(.name | ascii_downcase == ($name | ascii_downcase)) | .id' 2>/dev/null)
-
-    if [ -n "$STACK_PROJECT_ID" ] && [ "$STACK_PROJECT_ID" != "null" ]; then
-        log "  Infisical project '$STACK_NAME' found (${STACK_PROJECT_ID})"
-    else
-        warn "  No Infisical project named '$STACK_NAME' — using default project"
-        STACK_PROJECT_ID="${INFISICAL_PROJECT_ID}"
-    fi
+    log "  Using Infisical project '$STACK_NAME' (${STACK_PROJECT_ID})"
 
     # Secrets für diesen Stack holen
     ENV_JSON=$(infisical secrets \

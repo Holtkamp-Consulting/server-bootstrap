@@ -1,6 +1,6 @@
 # server-bootstrap
 
-One-liner setup script for Raspberry Pi and other Linux servers. Installs Docker and Portainer CE, prompts for an admin username, and generates a random password.
+One-liner setup script for Raspberry Pi and other Linux servers. Installs Docker and Portainer CE, configures Infisical and GitHub credentials, then deploys Portainer stacks from GitHub repositories.
 
 ## Usage
 
@@ -8,7 +8,7 @@ One-liner setup script for Raspberry Pi and other Linux servers. Installs Docker
 curl -fsSL https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/install.sh -o install.sh && bash install.sh
 ```
 
-During installation you will be prompted to enter an admin username. The password is generated automatically and displayed at the end.
+During the first installation you will be prompted for Infisical Machine Identity credentials and a GitHub token. The Portainer admin password is generated automatically and displayed at the end.
 
 ## What it installs
 
@@ -16,6 +16,7 @@ During installation you will be prompted to enter an admin username. The passwor
 |--------------|---------|-----------------------------|
 | Docker CE    | latest  | —                           |
 | Portainer CE | latest  | 9000 (HTTP), 9443 (HTTPS)   |
+| Infisical CLI | latest | —                           |
 
 ## Requirements
 
@@ -30,6 +31,20 @@ Optional environment variables to override default ports:
 ```bash
 PORTAINER_PORT_HTTP=9000 PORTAINER_PORT_HTTPS=9443 bash install.sh
 ```
+
+Credentials are stored in `/etc/infisical-deploy.env` with mode `600`. Re-running the installer reuses this config.
+
+## Stack deployment
+
+The installer deploys every GitHub repository whose repository name matches an Infisical project visible to the configured Machine Identity. Project matching is case-insensitive.
+
+For each matching project/repository pair:
+
+- secrets are loaded from the Infisical project with the same name
+- the Portainer stack name is the Infisical project name
+- the GitHub repository is deployed using `docker-compose.yaml` from the `main` branch
+
+Projects without a matching GitHub repository are skipped. Repositories without a matching Infisical project are not deployed.
 
 ## After installation
 
