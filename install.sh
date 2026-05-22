@@ -330,19 +330,42 @@ ok "Infisical authenticated"
 echo ""
 log "Fetching Infisical projects available to the Machine Identity..."
 
-WORKSPACES_JSON=$(curl -sf \
+PROJECTS_RESPONSE_FILE=$(mktemp)
+PROJECTS_HTTP=$(curl -sS \
+    -o "$PROJECTS_RESPONSE_FILE" \
+    -w "%{http_code}" \
     -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
-    "${INFISICAL_URL}/api/v1/workspace" 2>/dev/null || echo '{"workspaces":[]}')
+    "${INFISICAL_URL}/api/v1/projects" 2>/dev/null || echo "000")
+PROJECTS_JSON=$(cat "$PROJECTS_RESPONSE_FILE")
+rm -f "$PROJECTS_RESPONSE_FILE"
 
-mapfile -t WORKSPACE_ROWS < <(echo "$WORKSPACES_JSON" | jq -r '.workspaces[] | [.name, .id] | @tsv')
+if [ "$PROJECTS_HTTP" != "200" ]; then
+    INFISICAL_ERROR=$(echo "$PROJECTS_JSON" | jq -r '.message // .error // empty' 2>/dev/null || true)
+    err "Could not fetch Infisical projects (HTTP ${PROJECTS_HTTP})"
+    if [ -n "$INFISICAL_ERROR" ]; then
+        err "Infisical API: ${INFISICAL_ERROR}"
+    else
+        err "Infisical API response was not JSON:"
+        err "$(echo "$PROJECTS_JSON" | head -c 300)"
+    fi
+    exit 1
+fi
 
-if [ ${#WORKSPACE_ROWS[@]} -eq 0 ]; then
+if ! echo "$PROJECTS_JSON" | jq -e '.projects | type == "array"' >/dev/null 2>&1; then
+    err "Infisical projects response did not contain a projects array"
+    err "$(echo "$PROJECTS_JSON" | head -c 300)"
+    exit 1
+fi
+
+mapfile -t PROJECT_ROWS < <(echo "$PROJECTS_JSON" | jq -r '.projects[] | [.name, .id] | @tsv')
+
+if [ ${#PROJECT_ROWS[@]} -eq 0 ]; then
     err "No Infisical projects visible to this Machine Identity"
     err "Add the Machine Identity to each project that should be deployed"
     exit 1
 fi
 
-ok "Found ${#WORKSPACE_ROWS[@]} Infisical projects"
+ok "Found ${#PROJECT_ROWS[@]} Infisical projects"
 
 declare -A REPOS_BY_STACK_NAME=()
 for REPO in "${REPO_NAMES[@]}"; do
@@ -359,7 +382,7 @@ DEPLOY_REPOS=()
 DEPLOY_PROJECT_IDS=()
 DEPLOY_STACK_NAMES=()
 
-for ROW in "${WORKSPACE_ROWS[@]}"; do
+for ROW in "${PROJECT_ROWS[@]}"; do
     IFS=$'\t' read -r PROJECT_NAME PROJECT_ID <<< "$ROW"
     STACK_KEY="${PROJECT_NAME,,}"
     if [ -n "${REPOS_BY_STACK_NAME[$STACK_KEY]:-}" ]; then
