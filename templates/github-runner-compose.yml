@@ -1,0 +1,48 @@
+# Template für einen selbst-gehosteten GitHub Actions Runner als Portainer-Stack.
+#
+# Setup:
+#   1. Neues GitHub-Repo "github-runner" in der Org anlegen, diese Datei als
+#      docker-compose.yaml einchecken.
+#   2. Infisical-Projekt "github-runner" anlegen und die unten aufgeführten
+#      Secrets hinterlegen.
+#   3. Den Stack via install.sh deployen — er wird automatisch gefunden,
+#      weil Repo-Name == Infisical-Projektname.
+#
+# Benötigte Infisical-Secrets:
+#   GITHUB_ACCESS_TOKEN   PAT mit Scope admin:org (für Runner-Registrierung)
+#   GITHUB_TOKEN          PAT mit Scope repo (für redeploy-stacks.sh)
+#   ORG_NAME              GitHub-Org-Name, z.B. Holtkamp-Consulting
+#   RUNNER_LABELS         Komma-getrennte Labels, z.B. portainer,prod
+#   RUNNER_NAME           Eindeutiger Runner-Name, z.B. prod-runner
+#   PORTAINER_URL         http://localhost:9000
+#   PORTAINER_PASSWORD    Portainer-Admin-Passwort
+#   INFISICAL_URL         Infisical-Instanz-URL
+#   INFISICAL_CLIENT_ID   Machine Identity Client ID
+#   INFISICAL_CLIENT_SECRET Machine Identity Client Secret
+#   INFISICAL_ENV         prod / dev
+#   INFISICAL_PATH        /
+
+services:
+  runner:
+    image: myoung34/github-runner:latest
+    restart: always
+    network_mode: host
+    environment:
+      RUNNER_SCOPE: org
+      ORG_NAME: ${ORG_NAME}
+      GITHUB_ACCESS_TOKEN: ${GITHUB_ACCESS_TOKEN}
+      LABELS: ${RUNNER_LABELS}
+      RUNNER_NAME: ${RUNNER_NAME}
+      ADDITIONAL_PACKAGES: jq
+      # Credentials für redeploy-stacks.sh
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      PORTAINER_URL: ${PORTAINER_URL}
+      PORTAINER_PASSWORD: ${PORTAINER_PASSWORD}
+      INFISICAL_URL: ${INFISICAL_URL}
+      INFISICAL_CLIENT_ID: ${INFISICAL_CLIENT_ID}
+      INFISICAL_CLIENT_SECRET: ${INFISICAL_CLIENT_SECRET}
+      INFISICAL_ENV: ${INFISICAL_ENV}
+      INFISICAL_PATH: ${INFISICAL_PATH}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/deploy:/opt/deploy:ro

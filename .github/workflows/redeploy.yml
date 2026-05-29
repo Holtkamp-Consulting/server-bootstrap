@@ -1,0 +1,19 @@
+name: Redeploy Stack
+
+on:
+  workflow_call:
+    inputs:
+      runner_label:
+        description: "Self-hosted runner environment label (dev or prod)"
+        required: true
+        type: string
+
+jobs:
+  redeploy:
+    runs-on: [self-hosted, portainer, "${{ inputs.runner_label }}"]
+    steps:
+      - name: Redeploy stack on ${{ inputs.runner_label }}
+        run: |
+          /opt/deploy/redeploy-stacks.sh \
+            --stack "${{ github.event.repository.name }}" \
+            --ref "refs/heads/${{ github.ref_name }}"

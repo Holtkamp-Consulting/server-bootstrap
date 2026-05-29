@@ -1,0 +1,23 @@
+name: Redeploy Stack
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+permissions:
+  contents: read
+
+jobs:
+  redeploy-dev:
+    if: github.ref_name == 'dev'
+    uses: Holtkamp-Consulting/server-bootstrap/.github/workflows/redeploy.yml@main
+    with:
+      runner_label: dev
+
+  redeploy-prod:
+    if: github.ref_name == 'main'
+    uses: Holtkamp-Consulting/server-bootstrap/.github/workflows/redeploy.yml@main
+    with:
+      runner_label: prod
