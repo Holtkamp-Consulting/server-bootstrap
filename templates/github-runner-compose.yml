@@ -8,19 +8,16 @@
 #   3. Den Stack via install.sh deployen — er wird automatisch gefunden,
 #      weil Repo-Name == Infisical-Projektname.
 #
-# Benötigte Infisical-Secrets:
-#   GITHUB_ACCESS_TOKEN   PAT mit Scope admin:org (für Runner-Registrierung)
-#   GITHUB_TOKEN          PAT mit Scope repo (für redeploy-stacks.sh)
-#   ORG_NAME              GitHub-Org-Name, z.B. Holtkamp-Consulting
-#   RUNNER_LABELS         Komma-getrennte Labels, z.B. portainer,prod
-#   RUNNER_NAME           Eindeutiger Runner-Name, z.B. prod-runner
-#   PORTAINER_URL         http://localhost:9000
-#   PORTAINER_PASSWORD    Portainer-Admin-Passwort
-#   INFISICAL_URL         Infisical-Instanz-URL
-#   INFISICAL_CLIENT_ID   Machine Identity Client ID
-#   INFISICAL_CLIENT_SECRET Machine Identity Client Secret
-#   INFISICAL_ENV         prod / dev
-#   INFISICAL_PATH        /
+# Credentials-Quellen:
+#   /etc/infisical-deploy.env (gemountet, 640 root:docker)
+#     enthält die Machine Identity Credentials und kann daher nicht selbst
+#     aus Infisical gelesen werden — diese Credentials sind der Zugang zu
+#     Infisical.
+#
+#   Infisical-Projekt "github-runner" (runner-spezifische Secrets):
+#     GITHUB_ACCESS_TOKEN   PAT mit Scope admin:org (für Runner-Registrierung)
+#     RUNNER_NAME           Eindeutiger Runner-Name, z.B. prod-runner
+#     RUNNER_LABELS         Komma-getrennte Labels, z.B. portainer,prod
 
 services:
   runner:
@@ -29,20 +26,12 @@ services:
     network_mode: host
     environment:
       RUNNER_SCOPE: org
-      ORG_NAME: ${ORG_NAME}
+      ORG_NAME: Holtkamp-Consulting
       GITHUB_ACCESS_TOKEN: ${GITHUB_ACCESS_TOKEN}
       LABELS: ${RUNNER_LABELS}
       RUNNER_NAME: ${RUNNER_NAME}
       ADDITIONAL_PACKAGES: jq
-      # Credentials für redeploy-stacks.sh
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
-      PORTAINER_URL: ${PORTAINER_URL}
-      PORTAINER_PASSWORD: ${PORTAINER_PASSWORD}
-      INFISICAL_URL: ${INFISICAL_URL}
-      INFISICAL_CLIENT_ID: ${INFISICAL_CLIENT_ID}
-      INFISICAL_CLIENT_SECRET: ${INFISICAL_CLIENT_SECRET}
-      INFISICAL_ENV: ${INFISICAL_ENV}
-      INFISICAL_PATH: ${INFISICAL_PATH}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/infisical-deploy.env:/etc/infisical-deploy.env:ro
       - /opt/deploy:/opt/deploy:ro

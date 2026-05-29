@@ -48,6 +48,40 @@ For each matching project/repository pair:
 
 Projects without a matching GitHub repository are skipped. Repositories without a matching Infisical project are not deployed.
 
+## Continuous deployment
+
+After the initial bootstrap, stacks can be redeployed automatically on every push via GitHub Actions.
+
+### How it works
+
+`install.sh` installs `/opt/deploy/redeploy-stacks.sh` on the server. A self-hosted GitHub Actions runner (see below) calls this script when a push triggers the workflow. The script refreshes Portainer credentials and Infisical secrets, then tells Portainer to pull the latest `docker-compose.yaml` from the repository and redeploy the stack.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `redeploy-stacks.sh` | Runs on the server. Authenticates against Portainer and Infisical, then triggers a git-based redeploy for the named stack. Works both on the host (reads `/etc/infisical-deploy.env`) and inside a container (reads env vars injected by Portainer). |
+| `.github/workflows/redeploy.yml` | Reusable GitHub Actions workflow. Maintained once here; called by all stack repos. Accepts `runner_label` (`dev` or `prod`) to select the right server. |
+| `templates/stack-deploy.yml` | Copy this to `.github/workflows/deploy.yml` in each stack repo. Triggers `redeploy.yml` on push to `main` (prod) or `dev`. |
+| `templates/github-runner-compose.yml` | `docker-compose.yaml` for the self-hosted GitHub Actions runner. Create a `github-runner` repository in the org, add this file as `docker-compose.yaml`, and create a matching Infisical project with the secrets listed in the file. The runner is then deployed automatically by `install.sh` alongside other stacks. |
+
+### Setting up a stack repo for CD
+
+1. Copy `templates/stack-deploy.yml` to `.github/workflows/deploy.yml` in the stack repo.
+2. Done — pushes to `main` redeploy on prod, pushes to `dev` redeploy on dev.
+
+### Setting up the GitHub Actions runner
+
+The runner itself is deployed as a Portainer stack:
+
+1. Create a `github-runner` repository in the org with `templates/github-runner-compose.yml` as `docker-compose.yaml`.
+2. Create an Infisical project named `github-runner` with three secrets: `GITHUB_ACCESS_TOKEN` (PAT with `admin:org` scope), `RUNNER_NAME`, and `RUNNER_LABELS` (e.g. `portainer,prod`).
+3. Re-run `install.sh` or wait for the next bootstrap — the runner stack is picked up automatically.
+
+The runner container reads Portainer and Infisical credentials from `/etc/infisical-deploy.env` (mounted read-only). These bootstrap credentials cannot come from Infisical itself — only runner-specific secrets live there.
+
+The runner uses `network_mode: host` so it can reach Portainer at `localhost:9000`.
+
 ## After installation
 
 Open Portainer in your browser:
