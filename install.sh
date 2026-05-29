@@ -190,11 +190,20 @@ else
     prompt_input "  Infisical URL (e.g. http://mac-studio:80): " INF_URL
     prompt_input "  Client ID:                                  " INF_CLIENT_ID
     prompt_secret "  Client Secret:                              " INF_CLIENT_SECRET
-    prompt_input "  Environment (prod/staging/dev):             " INF_ENV
     require_value "$INF_URL" "Infisical URL"
     require_value "$INF_CLIENT_ID" "Infisical Client ID"
     require_value "$INF_CLIENT_SECRET" "Infisical Client Secret"
-    require_value "$INF_ENV" "Infisical environment"
+
+    INF_ENV=""
+    case "$(hostname)" in
+        *-prod) INF_ENV="prod" ; log "Environment derived from hostname: prod" ;;
+        *-dev)  INF_ENV="dev"  ; log "Environment derived from hostname: dev"  ;;
+    esac
+    if [ -z "$INF_ENV" ]; then
+        prompt_input "  Environment (prod/staging/dev):             " INF_ENV
+        require_value "$INF_ENV" "Infisical environment"
+    fi
+
     echo ""
     log "GitHub Personal Access Token (needs repo scope):"
     prompt_secret "  GitHub Token: " GITHUB_TOKEN
@@ -221,12 +230,13 @@ else
         printf 'INFISICAL_CLIENT_SECRET=%q\n' "$INF_CLIENT_SECRET"
         printf 'INFISICAL_ENV=%q\n' "$INF_ENV"
         printf 'INFISICAL_PATH=%q\n' "/"
-        printf 'PORTAINER_URL=%q\n' "http://localhost:${PORTAINER_PORT_HTTP}"
+        printf 'PORTAINER_URL=%q\n' "https://localhost:${PORTAINER_PORT_HTTPS}"
         printf 'PORTAINER_PASSWORD=%q\n' "$PORTAINER_PASSWORD"
         printf 'PORTAINER_TOKEN=%q\n' "$PORTAINER_JWT"
         printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
     } | sudo tee "$DEPLOY_CONFIG" > /dev/null
-    sudo chmod 600 "$DEPLOY_CONFIG"
+    sudo chown root:docker "$DEPLOY_CONFIG"
+    sudo chmod 640 "$DEPLOY_CONFIG"
     load_deploy_config
     ok "Credentials saved to $DEPLOY_CONFIG"
 fi
@@ -240,7 +250,7 @@ AUTH_PAYLOAD=$(jq -n \
     --arg username "$PORTAINER_ADMIN" \
     --arg password "$PORTAINER_PASSWORD" \
     '{username: $username, password: $password}')
-PORTAINER_TOKEN=$(curl -sf -X POST \
+PORTAINER_TOKEN=$(curl -sfk -X POST \
     -H "Content-Type: application/json" \
     -d "$AUTH_PAYLOAD" \
     "${PORTAINER_URL}/api/auth" 2>/dev/null | jq -r '.jwt // empty' || true)
@@ -252,7 +262,7 @@ fi
 ok "Portainer token refreshed"
 
 # Portainer local endpoint ID
-ENDPOINT_ID=$(curl -sf \
+ENDPOINT_ID=$(curl -sfk \
     -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
     "${PORTAINER_URL}/api/endpoints" | jq '.[0].Id')
 
@@ -443,19 +453,19 @@ for i in "${!DEPLOY_REPOS[@]}"; do
     ok "  Loaded $(echo "$ENV_JSON" | jq 'length') secret(s)"
 
     # Prüfen ob Stack schon existiert → update vs. create
-    EXISTING_ID=$(curl -sf \
+    EXISTING_ID=$(curl -sfk \
         -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
         "${PORTAINER_URL}/api/stacks" \
         | jq --arg name "$STACK_NAME" '.[] | select(.Name == $name) | .Id' 2>/dev/null || true)
 
     if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
-        STACK_FILE=$(curl -sf \
+        STACK_FILE=$(curl -sfk \
             -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
             "${PORTAINER_URL}/api/stacks/${EXISTING_ID}/file" \
             | jq -r '.StackFileContent')
 
         PORTAINER_RESPONSE_FILE=$(mktemp)
-        PORTAINER_HTTP=$(curl -sS -X PUT \
+        PORTAINER_HTTP=$(curl -sSk -X PUT \
             -o "$PORTAINER_RESPONSE_FILE" \
             -w "%{http_code}" \
             -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
@@ -476,7 +486,7 @@ for i in "${!DEPLOY_REPOS[@]}"; do
         ok "Stack '$STACK_NAME' updated"
     else
         PORTAINER_RESPONSE_FILE=$(mktemp)
-        PORTAINER_HTTP=$(curl -sS -X POST \
+        PORTAINER_HTTP=$(curl -sSk -X POST \
             -o "$PORTAINER_RESPONSE_FILE" \
             -w "%{http_code}" \
             -H "Authorization: Bearer ${PORTAINER_TOKEN}" \

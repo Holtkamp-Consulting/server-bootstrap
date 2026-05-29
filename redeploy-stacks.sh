@@ -32,13 +32,13 @@ fi
 # ── Portainer JWT ──────────────────────────────────────────────────────────────
 AUTH_PAYLOAD=$(jq -n --arg u "$PORTAINER_ADMIN" --arg p "$PORTAINER_PASSWORD" \
     '{username: $u, password: $p}')
-PORTAINER_TOKEN=$(curl -sf -X POST \
+PORTAINER_TOKEN=$(curl -sfk -X POST \
     -H "Content-Type: application/json" \
     -d "$AUTH_PAYLOAD" \
     "${PORTAINER_URL}/api/auth" | jq -r '.jwt // empty')
 [[ -z "$PORTAINER_TOKEN" ]] && { echo "Portainer auth failed"; exit 1; }
 
-ENDPOINT_ID=$(curl -sf \
+ENDPOINT_ID=$(curl -sfk \
     -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
     "${PORTAINER_URL}/api/endpoints" | jq '.[0].Id')
 
@@ -76,7 +76,7 @@ ENV_JSON=$(echo "$SECRETS_RESP" | jq '[
   | to_entries | map({name: .key, value: .value})')
 
 # ── Portainer stack ───────────────────────────────────────────────────────────
-STACK_ID=$(curl -sf \
+STACK_ID=$(curl -sfk \
     -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
     "${PORTAINER_URL}/api/stacks" \
     | jq --arg n "$STACK_NAME" '.[] | select(.Name == $n) | .Id')
@@ -96,7 +96,7 @@ if [[ -n "$REF" ]]; then
 fi
 
 RESPONSE_FILE=$(mktemp)
-HTTP=$(curl -sS -X POST \
+HTTP=$(curl -sSk -X POST \
     -o "$RESPONSE_FILE" -w "%{http_code}" \
     -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
     -H "Content-Type: application/json" \
