@@ -83,7 +83,7 @@ if ! command -v jq &>/dev/null; then
 fi
 
 # ── 1. Docker ─────────────────────────────────────────────────────────────────
-log "Step 1/6 — Docker"
+log "Step 1/7 — Docker"
 
 if command -v docker &>/dev/null; then
     ok "Docker already installed ($(docker --version | cut -d' ' -f3 | tr -d ','))"
@@ -100,7 +100,7 @@ if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
 fi
 
 # ── 2. Portainer ───────────────────────────────────────────────────────────────
-log "Step 2/6 — Portainer CE"
+log "Step 2/7 — Portainer CE"
 
 # Use sudo only if the current user can't write to the socket directly
 if [ -w /var/run/docker.sock ]; then
@@ -127,7 +127,7 @@ else
 fi
 
 # ── 3. Credentials ─────────────────────────────────────────────────────────────
-log "Step 3/6 — Configuring admin credentials"
+log "Step 3/7 — Configuring admin credentials"
 
 PORTAINER_API="http://localhost:${PORTAINER_PORT_HTTP}"
 MAX_WAIT=90
@@ -168,7 +168,7 @@ case "$INIT_HTTP" in
 esac
 
 # ── 4. Infisical CLI ───────────────────────────────────────────────────────────
-log "Step 4/6 — Infisical CLI"
+log "Step 4/7 — Infisical CLI"
 
 if command -v infisical &>/dev/null; then
     ok "Infisical CLI already installed ($(infisical --version 2>&1 | head -1))"
@@ -179,7 +179,7 @@ else
 fi
 
 # ── 5. Credentials ────────────────────────────────────────────────────────────
-log "Step 5/6 — Infisical + GitHub credentials"
+log "Step 5/7 — Infisical + GitHub credentials"
 
 if [ -f "$DEPLOY_CONFIG" ]; then
     warn "Deploy config already exists at $DEPLOY_CONFIG — skipping credential setup"
@@ -232,7 +232,7 @@ else
 fi
 
 # ── 6. Stacks deployen ─────────────────────────────────────────────────────────
-log "Step 6/6 — Stack deployment from GitHub"
+log "Step 6/7 — Stack deployment from GitHub"
 
 # Portainer JWT immer frisch holen (cached token kann abgelaufen sein)
 log "Refreshing Portainer API token..."
@@ -508,6 +508,16 @@ for i in "${!DEPLOY_REPOS[@]}"; do
         ok "Stack '$STACK_NAME' created and deployed"
     fi
 done
+
+# ── 7. Redeploy script ────────────────────────────────────────────────────────
+log "Step 7/7 — Installing redeploy-stacks.sh"
+
+sudo mkdir -p /opt/deploy
+curl -fsSL \
+    "https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/redeploy-stacks.sh" \
+    | sudo tee /opt/deploy/redeploy-stacks.sh > /dev/null
+sudo chmod +x /opt/deploy/redeploy-stacks.sh
+ok "Installed /opt/deploy/redeploy-stacks.sh"
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
