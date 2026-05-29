@@ -87,7 +87,7 @@ The runner uses `network_mode: host` so it can reach Portainer at `localhost:900
 Open Portainer in your browser:
 
 ```
-http://<device-ip>:9000
+https://<device-ip>:9443
 ```
 
 Log in with the credentials shown at the end of the installation output.
