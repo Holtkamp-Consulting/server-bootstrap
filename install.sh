@@ -526,9 +526,10 @@ for i in "${!DEPLOY_REPOS[@]}"; do
 
     if [ "$STACK_NAME" = "github-runner" ]; then
         require_value "${APP_PRIVATE_KEY:-}" "APP_PRIVATE_KEY"
+        APP_PRIVATE_KEY_B64="$(printf '%s' "$APP_PRIVATE_KEY" | base64 | tr -d '\n')"
         ENV_JSON=$(echo "$ENV_JSON" | jq \
-            --arg value "$APP_PRIVATE_KEY" \
-            'map(select(.name != "APP_PRIVATE_KEY")) + [{name: "APP_PRIVATE_KEY", value: $value}]')
+            --arg value "$APP_PRIVATE_KEY_B64" \
+            'map(select(.name != "APP_PRIVATE_KEY" and .name != "APP_PRIVATE_KEY_B64")) + [{name: "APP_PRIVATE_KEY_B64", value: $value}]')
     fi
     ok "  Loaded $(echo "$ENV_JSON" | jq 'length') secret(s)"
 
