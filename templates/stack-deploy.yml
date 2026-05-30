@@ -1,6 +1,7 @@
 name: Redeploy Stack
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
