@@ -33,9 +33,9 @@ printf 'APP_PRIVATE_KEY=%s\n' "$(quote_env_value "$private_key")" > "$tmp_env"
 source "$tmp_env"
 
 assert_eq \
-    'BEGIN TEST KEY\nline with spaces\nEND TEST KEY' \
+    $'BEGIN TEST KEY\nline with spaces\nEND TEST KEY' \
     "$APP_PRIVATE_KEY" \
-    'private key keeps escaped newlines when sourced'
+    'private key keeps real newlines when sourced'
 
 quoted_secret="$(quote_env_value "token with spaces and ' quote")"
 printf 'SECRET=%s\n' "$quoted_secret" > "$tmp_env"
@@ -58,16 +58,16 @@ collapsed_pem='-----BEGIN RSA TEST-----  abc def  -----END RSA TEST-----'
 normalized_pem="$(normalize_private_key "$collapsed_pem")"
 
 assert_eq \
-    '-----BEGIN RSA TEST-----\nabc\ndef\n-----END RSA TEST-----' \
+    $'-----BEGIN RSA TEST-----\nabc\ndef\n-----END RSA TEST-----' \
     "$normalized_pem" \
-    'single-line PEM private key spaces become escaped newlines'
+    'single-line PEM private key spaces become real newlines'
 
 escaped_pem='-----BEGIN RSA TEST-----\nabc\n-----END RSA TEST-----'
 normalized_escaped_pem="$(normalize_private_key "$escaped_pem")"
 
 assert_eq \
-    "$escaped_pem" \
+    $'-----BEGIN RSA TEST-----\nabc\n-----END RSA TEST-----' \
     "$normalized_escaped_pem" \
-    'already escaped private key newlines are preserved'
+    'escaped private key newlines become real newlines'
 
 printf 'PASS: install env serialization\n'
