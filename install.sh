@@ -36,6 +36,21 @@ prompt_secret() {
     echo ""
 }
 
+prompt_multiline_secret() {
+    local prompt="$1"
+    local var_name="$2"
+
+    echo -e "$prompt (paste content, then Ctrl+D on a new line):"
+    local value
+    if [ -r /dev/tty ]; then
+        value=$(cat < /dev/tty)
+    else
+        value=$(cat)
+    fi
+    printf -v "$var_name" '%s' "$value"
+    echo ""
+}
+
 require_value() {
     local value="$1"
     local label="$2"
@@ -209,6 +224,11 @@ else
     prompt_secret "  GitHub Token: " GITHUB_TOKEN
     require_value "$GITHUB_TOKEN" "GitHub token"
 
+    log "GitHub App Private Key (paste the PEM file content):"
+    prompt_multiline_secret "  APP_PRIVATE_KEY" APP_PRIVATE_KEY_RAW
+    require_value "$APP_PRIVATE_KEY_RAW" "APP_PRIVATE_KEY"
+    APP_PRIVATE_KEY="${APP_PRIVATE_KEY_RAW//$'\n'/\\n}"
+
     log "Fetching Portainer API token..."
     AUTH_PAYLOAD=$(jq -n \
         --arg username "$PORTAINER_ADMIN" \
@@ -234,6 +254,7 @@ else
         printf 'PORTAINER_PASSWORD=%q\n' "$PORTAINER_PASSWORD"
         printf 'PORTAINER_TOKEN=%q\n' "$PORTAINER_JWT"
         printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
+        printf 'APP_PRIVATE_KEY=%s\n' "$APP_PRIVATE_KEY"
     } | sudo tee "$DEPLOY_CONFIG" > /dev/null
     sudo chown root:docker "$DEPLOY_CONFIG"
     sudo chmod 640 "$DEPLOY_CONFIG"
