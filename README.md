@@ -75,7 +75,7 @@ After the initial bootstrap, stacks can be redeployed automatically on every pus
 The runner itself is deployed as a Portainer stack:
 
 1. Create a `github-runner` repository in the org with `templates/github-runner-compose.yml` as `docker-compose.yml`.
-2. Create an Infisical project named `github-runner` with three secrets: `GITHUB_ACCESS_TOKEN` (PAT with `admin:org` scope), `RUNNER_NAME`, and `RUNNER_LABELS` (e.g. `portainer,prod`).
+2. Create an Infisical project named `github-runner` with the secrets `APP_ID`, `APP_PRIVATE_KEY`, `APP_LOGIN`, `RUNNER_NAME`, and `RUNNER_LABELS` (e.g. `portainer,prod`).
 3. Re-run `install.sh` or wait for the next bootstrap — the runner stack is picked up automatically.
 
 The runner container reads Portainer and Infisical credentials from `/etc/infisical-deploy.env` (mounted read-only). These bootstrap credentials cannot come from Infisical itself — only runner-specific secrets live there.
