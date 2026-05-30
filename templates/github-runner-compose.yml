@@ -15,7 +15,9 @@
 #     Infisical.
 #
 #   Infisical-Projekt "github-runner" (runner-spezifische Secrets):
-#     GITHUB_ACCESS_TOKEN   PAT mit Scope admin:org (für Runner-Registrierung)
+#     APP_ID                GitHub App ID
+#     APP_PRIVATE_KEY       GitHub App Private Key im PEM-Format
+#     APP_LOGIN             GitHub App/Login-Kontext, z.B. Org-Name
 #     RUNNER_NAME           Eindeutiger Runner-Name, z.B. prod-runner
 #     RUNNER_LABELS         Komma-getrennte Labels, z.B. portainer,prod
 
@@ -27,7 +29,9 @@ services:
     environment:
       RUNNER_SCOPE: org
       ORG_NAME: Holtkamp-Consulting
-      GITHUB_ACCESS_TOKEN: ${GITHUB_ACCESS_TOKEN}
+      APP_ID: ${APP_ID}
+      APP_PRIVATE_KEY: ${APP_PRIVATE_KEY}
+      APP_LOGIN: ${APP_LOGIN}
       LABELS: ${RUNNER_LABELS}
       RUNNER_NAME: ${RUNNER_NAME}
       ADDITIONAL_PACKAGES: jq

@@ -523,6 +523,13 @@ for i in "${!DEPLOY_REPOS[@]}"; do
         ] | reduce .[] as $secret ({};
             .[$secret.secretKey] = ($secret.secretValue | env_secret_value($secret.secretKey))
         ) | to_entries | map({name: .key, value: .value})')
+
+    if [ "$STACK_NAME" = "github-runner" ]; then
+        require_value "${APP_PRIVATE_KEY:-}" "APP_PRIVATE_KEY"
+        ENV_JSON=$(echo "$ENV_JSON" | jq \
+            --arg value "$APP_PRIVATE_KEY" \
+            'map(select(.name != "APP_PRIVATE_KEY")) + [{name: "APP_PRIVATE_KEY", value: $value}]')
+    fi
     ok "  Loaded $(echo "$ENV_JSON" | jq 'length') secret(s)"
 
     # Prüfen ob Stack schon existiert → update vs. create

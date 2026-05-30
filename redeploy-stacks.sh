@@ -89,6 +89,13 @@ def env_secret_value($key):
 ] | reduce .[] as $s ({}; .[$s.secretKey] = ($s.secretValue | env_secret_value($s.secretKey)))
   | to_entries | map({name: .key, value: .value})')
 
+if [[ "$STACK_NAME" == "github-runner" ]]; then
+    [[ -z "${APP_PRIVATE_KEY:-}" ]] && { echo "APP_PRIVATE_KEY missing from deploy config"; exit 1; }
+    ENV_JSON=$(echo "$ENV_JSON" | jq \
+        --arg value "$APP_PRIVATE_KEY" \
+        'map(select(.name != "APP_PRIVATE_KEY")) + [{name: "APP_PRIVATE_KEY", value: $value}]')
+fi
+
 # ── Portainer stack ───────────────────────────────────────────────────────────
 STACK_ID=$(curl -sfk \
     -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
