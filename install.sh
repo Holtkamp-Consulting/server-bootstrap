@@ -54,6 +54,35 @@ prompt_multiline_secret() {
     echo ""
 }
 
+normalize_private_key() {
+    local value="$1"
+    value="${value#APP_PRIVATE_KEY=}"
+    value="${value//$'\r'/}"
+
+    if [[ "$value" == *$'\n'* ]]; then
+        printf '%s' "${value//$'\n'/\\n}"
+        return
+    fi
+
+    if [[ "$value" == *'\\n'* ]]; then
+        printf '%s' "$value"
+        return
+    fi
+
+    if [[ "$value" =~ ^(-----BEGIN[[:space:]][^-]+-----)[[:space:]]+(.+)[[:space:]]+(-----END[[:space:]][^-]+-----)$ ]]; then
+        local header="${BASH_REMATCH[1]}"
+        local body="${BASH_REMATCH[2]}"
+        local footer="${BASH_REMATCH[3]}"
+
+        body="$(printf '%s' "$body" | tr -s '[:space:]' '\n')"
+        body="${body//$'\n'/\\n}"
+        printf '%s\\n%s\\n%s' "$header" "$body" "$footer"
+        return
+    fi
+
+    printf '%s' "$value"
+}
+
 quote_env_value() {
     local value="$1"
     value=${value//\'/\'\\\'\'}
@@ -235,9 +264,8 @@ else
 
     log "GitHub App Private Key (paste the PEM file content):"
     prompt_multiline_secret "  APP_PRIVATE_KEY" APP_PRIVATE_KEY_RAW
-    APP_PRIVATE_KEY_RAW="${APP_PRIVATE_KEY_RAW#APP_PRIVATE_KEY=}"
     require_value "$APP_PRIVATE_KEY_RAW" "APP_PRIVATE_KEY"
-    APP_PRIVATE_KEY="${APP_PRIVATE_KEY_RAW//$'\n'/\\n}"
+    APP_PRIVATE_KEY="$(normalize_private_key "$APP_PRIVATE_KEY_RAW")"
 
     log "Fetching Portainer API token..."
     AUTH_PAYLOAD=$(jq -n \
@@ -475,11 +503,23 @@ for i in "${!DEPLOY_REPOS[@]}"; do
     fi
 
     ENV_JSON=$(echo "$SECRETS_JSON" \
-        | jq '[
+        | jq '
+        def normalize_private_key_value:
+            if type != "string" then .
+            elif test("\\\\n") then .
+            elif test("^-----BEGIN [^-]+-----[[:space:]]+.+[[:space:]]+-----END [^-]+-----$") then
+                capture("^(?<header>-----BEGIN [^-]+-----)[[:space:]]+(?<body>.+)[[:space:]]+(?<footer>-----END [^-]+-----)$")
+                | "\(.header)\n\(.body | gsub("[[:space:]]+"; "\n"))\n\(.footer)"
+            else .
+            end;
+        def env_secret_value($key):
+            (if ($key | test("(^|_)PRIVATE_KEY$")) then normalize_private_key_value else . end)
+            | if type == "string" then gsub("\n"; "\\n") else . end;
+        [
             ((.imports // []) | .[].secrets[]?),
             (.secrets // [])[]
         ] | reduce .[] as $secret ({};
-            .[$secret.secretKey] = ($secret.secretValue | gsub("\n"; "\\n"))
+            .[$secret.secretKey] = ($secret.secretValue | env_secret_value($secret.secretKey))
         ) | to_entries | map({name: .key, value: .value})')
     ok "  Loaded $(echo "$ENV_JSON" | jq 'length') secret(s)"
 
