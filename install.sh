@@ -254,7 +254,7 @@ else
         printf 'PORTAINER_PASSWORD=%q\n' "$PORTAINER_PASSWORD"
         printf 'PORTAINER_TOKEN=%q\n' "$PORTAINER_JWT"
         printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
-        printf 'APP_PRIVATE_KEY=%s\n' "$APP_PRIVATE_KEY"
+        printf 'APP_PRIVATE_KEY=%q\n' "$APP_PRIVATE_KEY"
     } | sudo tee "$DEPLOY_CONFIG" > /dev/null
     sudo chown root:docker "$DEPLOY_CONFIG"
     sudo chmod 640 "$DEPLOY_CONFIG"
