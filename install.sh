@@ -46,12 +46,18 @@ prompt_multiline_secret() {
     [ -r /dev/tty ] && exec 3</dev/tty && fd=3 || exec 3<&0 && fd=3
     while IFS= read -r line <&3; do
         value+="${line}"$'\n'
-        [[ "$line" == "-----END"* ]] && break
+        [[ "$line" == *"-----END "*"-----"* ]] && break
     done
     exec 3<&-
     value="${value%$'\n'}"
     printf -v "$var_name" '%s' "$value"
     echo ""
+}
+
+quote_env_value() {
+    local value="$1"
+    value=${value//\'/\'\\\'\'}
+    printf "'%s'\n" "$value"
 }
 
 require_value() {
@@ -229,6 +235,7 @@ else
 
     log "GitHub App Private Key (paste the PEM file content):"
     prompt_multiline_secret "  APP_PRIVATE_KEY" APP_PRIVATE_KEY_RAW
+    APP_PRIVATE_KEY_RAW="${APP_PRIVATE_KEY_RAW#APP_PRIVATE_KEY=}"
     require_value "$APP_PRIVATE_KEY_RAW" "APP_PRIVATE_KEY"
     APP_PRIVATE_KEY="${APP_PRIVATE_KEY_RAW//$'\n'/\\n}"
 
@@ -248,16 +255,16 @@ else
     fi
 
     {
-        printf 'INFISICAL_URL=%q\n' "$INF_URL"
-        printf 'INFISICAL_CLIENT_ID=%q\n' "$INF_CLIENT_ID"
-        printf 'INFISICAL_CLIENT_SECRET=%q\n' "$INF_CLIENT_SECRET"
-        printf 'INFISICAL_ENV=%q\n' "$INF_ENV"
-        printf 'INFISICAL_PATH=%q\n' "/"
-        printf 'PORTAINER_URL=%q\n' "https://localhost:${PORTAINER_PORT_HTTPS}"
-        printf 'PORTAINER_PASSWORD=%q\n' "$PORTAINER_PASSWORD"
-        printf 'PORTAINER_TOKEN=%q\n' "$PORTAINER_JWT"
-        printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
-        printf 'APP_PRIVATE_KEY=%q\n' "$APP_PRIVATE_KEY"
+        printf 'INFISICAL_URL=%s\n' "$(quote_env_value "$INF_URL")"
+        printf 'INFISICAL_CLIENT_ID=%s\n' "$(quote_env_value "$INF_CLIENT_ID")"
+        printf 'INFISICAL_CLIENT_SECRET=%s\n' "$(quote_env_value "$INF_CLIENT_SECRET")"
+        printf 'INFISICAL_ENV=%s\n' "$(quote_env_value "$INF_ENV")"
+        printf 'INFISICAL_PATH=%s\n' "$(quote_env_value "/")"
+        printf 'PORTAINER_URL=%s\n' "$(quote_env_value "https://localhost:${PORTAINER_PORT_HTTPS}")"
+        printf 'PORTAINER_PASSWORD=%s\n' "$(quote_env_value "$PORTAINER_PASSWORD")"
+        printf 'PORTAINER_TOKEN=%s\n' "$(quote_env_value "$PORTAINER_JWT")"
+        printf 'GITHUB_TOKEN=%s\n' "$(quote_env_value "$GITHUB_TOKEN")"
+        printf 'APP_PRIVATE_KEY=%s\n' "$(quote_env_value "$APP_PRIVATE_KEY")"
     } | sudo tee "$DEPLOY_CONFIG" > /dev/null
     sudo chown root:docker "$DEPLOY_CONFIG"
     sudo chmod 640 "$DEPLOY_CONFIG"
