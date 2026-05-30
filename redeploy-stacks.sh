@@ -150,6 +150,57 @@ update_stack_from_repository() {
         -d "$update_body"
 }
 
+schedule_self_update_from_repository() {
+    local response_file="$1"
+    local repo="${GITHUB_REPOSITORY:-Holtkamp-Consulting/${STACK_NAME}}"
+    local ref="${REF:-refs/heads/main}"
+    local ref_name="$ref"
+    ref_name="${ref_name#refs/heads/}"
+    ref_name="${ref_name#refs/tags/}"
+    local ref_q
+    ref_q=$(jq -nr --arg v "$ref_name" '$v | @uri')
+
+    local compose_file
+    if ! compose_file=$(curl -sSfL \
+        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github.raw" \
+        "https://api.github.com/repos/${repo}/contents/docker-compose.yml?ref=${ref_q}" 2>"$response_file"); then
+        echo "Failed to fetch docker-compose.yml for '$STACK_NAME'"
+        head -c 500 "$response_file"
+        rm -f "$response_file"
+        exit 1
+    fi
+
+    local update_body_file
+    update_body_file=$(mktemp)
+    chmod 600 "$update_body_file"
+    jq -n \
+        --arg content "$compose_file" \
+        --argjson env "$ENV_JSON" \
+        '{stackFileContent: $content, env: $env, pullImage: true}' > "$update_body_file"
+
+    # Updating the runner stack stops this very container. Detach the Portainer
+    # call so GitHub Actions can record a successful job before the restart.
+    env -u RUNNER_TRACKING_ID \
+        PORTAINER_TOKEN="$PORTAINER_TOKEN" \
+        PORTAINER_URL="$PORTAINER_URL" \
+        STACK_ID="$STACK_ID" \
+        ENDPOINT_ID="$ENDPOINT_ID" \
+        UPDATE_BODY_FILE="$update_body_file" \
+        nohup bash -c '
+        sleep 5
+        curl -sSk -X PUT \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/stacks/${STACK_ID}?endpointId=${ENDPOINT_ID}" \
+            -d @"${UPDATE_BODY_FILE}" >/tmp/github-runner-self-update.log 2>&1
+        rm -f "${UPDATE_BODY_FILE}"
+    ' >/dev/null 2>&1 &
+
+    echo "Stack '$STACK_NAME' self-update scheduled; runner will restart shortly"
+    rm -f "$response_file"
+}
+
 RESPONSE_FILE=$(mktemp)
 HTTP=$(curl -sSk -X PUT \
     -o "$RESPONSE_FILE" -w "%{http_code}" \
@@ -163,6 +214,10 @@ if [[ "$HTTP" -ge 200 && "$HTTP" -lt 300 ]]; then
     rm -f "$RESPONSE_FILE"
 elif [[ "$HTTP" == "400" ]] && grep -q "Stack is not created from git" "$RESPONSE_FILE"; then
     echo "Stack '$STACK_NAME' is not git-based in Portainer; updating stack file from repository"
+    if [[ "$STACK_NAME" == "github-runner" ]]; then
+        schedule_self_update_from_repository "$RESPONSE_FILE"
+        exit 0
+    fi
     HTTP=$(update_stack_from_repository "$RESPONSE_FILE")
     if [[ "$HTTP" -ge 200 && "$HTTP" -lt 300 ]]; then
         echo "Stack '$STACK_NAME' updated (HTTP $HTTP)"
