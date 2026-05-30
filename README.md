@@ -54,13 +54,13 @@ After the initial bootstrap, stacks can be redeployed automatically on every pus
 
 ### How it works
 
-`install.sh` installs `/opt/deploy/redeploy-stacks.sh` on the server. A self-hosted GitHub Actions runner (see below) calls this script when a push triggers the workflow. The script refreshes Portainer credentials and Infisical secrets, then tells Portainer to pull the latest `docker-compose.yml` from the repository and redeploy the stack.
+`install.sh` installs `/opt/deploy/redeploy-stacks.sh` on the server. A self-hosted GitHub Actions runner (see below) calls this script when a push triggers the workflow. The script refreshes Portainer credentials and Infisical secrets, then tells Portainer to pull the latest `docker-compose.yml` from the repository and redeploy the stack. If an existing stack was created through Portainer's API instead of as a git-based stack, the script falls back to updating the stack with the current repository `docker-compose.yml`.
 
 ### Files
 
 | File | Purpose |
 |---|---|
-| `redeploy-stacks.sh` | Runs on the server. Authenticates against Portainer and Infisical, then triggers a git-based redeploy for the named stack. Works both on the host (reads `/etc/infisical-deploy.env`) and inside a container (reads env vars injected by Portainer). |
+| `redeploy-stacks.sh` | Runs on the server. Authenticates against Portainer and Infisical, then redeploys the named stack. It uses Portainer's git redeploy endpoint for git-based stacks and falls back to a stack-file update for API-created stacks. Works both on the host (reads `/etc/infisical-deploy.env`) and inside a container (reads env vars injected by Portainer). |
 | `.github/workflows/redeploy.yml` | Reusable GitHub Actions workflow. Maintained once here; called by all stack repos. Accepts `runner_label` (`dev` or `prod`) to select the right server. |
 | `templates/stack-deploy.yml` | Copy this to `.github/workflows/deploy.yml` in each stack repo. Triggers `redeploy.yml` on push to `main` (prod) or `dev`. |
 | `templates/github-runner-compose.yml` | `docker-compose.yml` for the self-hosted GitHub Actions runner. Create a `github-runner` repository in the org, add this file as `docker-compose.yml`, and create a matching Infisical project with the secrets listed in the file. The runner is then deployed automatically by `install.sh` alongside other stacks. |
