@@ -501,7 +501,7 @@ for i in "${!DEPLOY_REPOS[@]}"; do
                     name: $name,
                     repositoryURL: $repo,
                     repositoryReferenceName: "refs/heads/main",
-                    filePathInRepository: "docker-compose.yaml",
+                    filePathInRepository: "docker-compose.yml",
                     repositoryAuthentication: true,
                     repositoryUsername: "token",
                     repositoryPassword: $token,

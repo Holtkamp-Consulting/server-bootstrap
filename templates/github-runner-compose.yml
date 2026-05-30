@@ -2,7 +2,7 @@
 #
 # Setup:
 #   1. Neues GitHub-Repo "github-runner" in der Org anlegen, diese Datei als
-#      docker-compose.yaml einchecken.
+#      docker-compose.yml einchecken.
 #   2. Infisical-Projekt "github-runner" anlegen und die unten aufgeführten
 #      Secrets hinterlegen.
 #   3. Den Stack via install.sh deployen — er wird automatisch gefunden,
