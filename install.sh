@@ -60,12 +60,13 @@ normalize_private_key() {
     value="${value//$'\r'/}"
 
     if [[ "$value" == *$'\n'* ]]; then
-        printf '%s' "${value//$'\n'/\\n}"
+        printf '%s' "$value"
         return
     fi
 
-    if [[ "$value" == *'\\n'* ]]; then
-        printf '%s' "$value"
+    if [[ "$value" == *'\n'* ]]; then
+        local newline=$'\n'
+        printf '%s' "${value//\\n/$newline}"
         return
     fi
 
@@ -75,8 +76,7 @@ normalize_private_key() {
         local footer="${BASH_REMATCH[3]}"
 
         body="$(printf '%s' "$body" | tr -s '[:space:]' '\n')"
-        body="${body//$'\n'/\\n}"
-        printf '%s\\n%s\\n%s' "$header" "$body" "$footer"
+        printf '%s\n%s\n%s' "$header" "$body" "$footer"
         return
     fi
 
@@ -506,15 +506,17 @@ for i in "${!DEPLOY_REPOS[@]}"; do
         | jq '
         def normalize_private_key_value:
             if type != "string" then .
-            elif test("\\\\n") then .
+            elif test("\\\\n") then gsub("\\\\n"; "\n")
             elif test("^-----BEGIN [^-]+-----[[:space:]]+.+[[:space:]]+-----END [^-]+-----$") then
                 capture("^(?<header>-----BEGIN [^-]+-----)[[:space:]]+(?<body>.+)[[:space:]]+(?<footer>-----END [^-]+-----)$")
                 | "\(.header)\n\(.body | gsub("[[:space:]]+"; "\n"))\n\(.footer)"
             else .
             end;
         def env_secret_value($key):
-            (if ($key | test("(^|_)PRIVATE_KEY$")) then normalize_private_key_value else . end)
-            | if type == "string" then gsub("\n"; "\\n") else . end;
+            if ($key | test("(^|_)PRIVATE_KEY$")) then normalize_private_key_value
+            elif type == "string" then gsub("\n"; "\\n")
+            else .
+            end;
         [
             ((.imports // []) | .[].secrets[]?),
             (.secrets // [])[]

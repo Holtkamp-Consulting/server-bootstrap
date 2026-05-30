@@ -72,15 +72,17 @@ SECRETS_RESP=$(curl -sf \
 ENV_JSON=$(echo "$SECRETS_RESP" | jq '
 def normalize_private_key_value:
     if type != "string" then .
-    elif test("\\\\n") then .
+    elif test("\\\\n") then gsub("\\\\n"; "\n")
     elif test("^-----BEGIN [^-]+-----[[:space:]]+.+[[:space:]]+-----END [^-]+-----$") then
         capture("^(?<header>-----BEGIN [^-]+-----)[[:space:]]+(?<body>.+)[[:space:]]+(?<footer>-----END [^-]+-----)$")
         | "\(.header)\n\(.body | gsub("[[:space:]]+"; "\n"))\n\(.footer)"
     else .
     end;
 def env_secret_value($key):
-    (if ($key | test("(^|_)PRIVATE_KEY$")) then normalize_private_key_value else . end)
-    | if type == "string" then gsub("\n"; "\\n") else . end;
+    if ($key | test("(^|_)PRIVATE_KEY$")) then normalize_private_key_value
+    elif type == "string" then gsub("\n"; "\\n")
+    else .
+    end;
 [
     ((.imports // []) | .[].secrets[]?),
     (.secrets // [])[]
