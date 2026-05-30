@@ -117,6 +117,39 @@ if [[ -n "$REF" ]]; then
     BODY=$(echo "$BODY" | jq --arg ref "$REF" '. + {repositoryReferenceName: $ref}')
 fi
 
+update_stack_from_repository() {
+    local response_file="$1"
+    local repo="${GITHUB_REPOSITORY:-Holtkamp-Consulting/${STACK_NAME}}"
+    local ref="${REF:-refs/heads/main}"
+    local ref_name="$ref"
+    ref_name="${ref_name#refs/heads/}"
+    ref_name="${ref_name#refs/tags/}"
+    local ref_q
+    ref_q=$(jq -nr --arg v "$ref_name" '$v | @uri')
+
+    local compose_file
+    if ! compose_file=$(curl -sSfL \
+        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github.raw" \
+        "https://api.github.com/repos/${repo}/contents/docker-compose.yml?ref=${ref_q}" 2>"$response_file"); then
+        echo "000"
+        return
+    fi
+
+    local update_body
+    update_body=$(jq -n \
+        --arg content "$compose_file" \
+        --argjson env "$ENV_JSON" \
+        '{stackFileContent: $content, env: $env, pullImage: true}')
+
+    curl -sSk -X PUT \
+        -o "$response_file" -w "%{http_code}" \
+        -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+        -H "Content-Type: application/json" \
+        "${PORTAINER_URL}/api/stacks/${STACK_ID}?endpointId=${ENDPOINT_ID}" \
+        -d "$update_body"
+}
+
 RESPONSE_FILE=$(mktemp)
 HTTP=$(curl -sSk -X PUT \
     -o "$RESPONSE_FILE" -w "%{http_code}" \
@@ -128,6 +161,18 @@ HTTP=$(curl -sSk -X PUT \
 if [[ "$HTTP" -ge 200 && "$HTTP" -lt 300 ]]; then
     echo "Stack '$STACK_NAME' redeployed (HTTP $HTTP)"
     rm -f "$RESPONSE_FILE"
+elif [[ "$HTTP" == "400" ]] && grep -q "Stack is not created from git" "$RESPONSE_FILE"; then
+    echo "Stack '$STACK_NAME' is not git-based in Portainer; updating stack file from repository"
+    HTTP=$(update_stack_from_repository "$RESPONSE_FILE")
+    if [[ "$HTTP" -ge 200 && "$HTTP" -lt 300 ]]; then
+        echo "Stack '$STACK_NAME' updated (HTTP $HTTP)"
+        rm -f "$RESPONSE_FILE"
+    else
+        echo "Failed to update '$STACK_NAME' (HTTP $HTTP)"
+        head -c 500 "$RESPONSE_FILE"
+        rm -f "$RESPONSE_FILE"
+        exit 1
+    fi
 else
     echo "Failed to redeploy '$STACK_NAME' (HTTP $HTTP)"
     head -c 500 "$RESPONSE_FILE"
