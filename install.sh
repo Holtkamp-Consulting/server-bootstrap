@@ -40,13 +40,16 @@ prompt_multiline_secret() {
     local prompt="$1"
     local var_name="$2"
 
-    echo -e "$prompt (paste content, then Ctrl+D on a new line):"
-    local value
-    if [ -r /dev/tty ]; then
-        value=$(cat < /dev/tty)
-    else
-        value=$(cat)
-    fi
+    echo -e "$prompt (paste PEM key, input stops automatically at -----END line):"
+    local value="" line
+    local fd=0
+    [ -r /dev/tty ] && exec 3</dev/tty && fd=3 || exec 3<&0 && fd=3
+    while IFS= read -r line <&3; do
+        value+="${line}"$'\n'
+        [[ "$line" == "-----END"* ]] && break
+    done
+    exec 3<&-
+    value="${value%$'\n'}"
     printf -v "$var_name" '%s' "$value"
     echo ""
 }
