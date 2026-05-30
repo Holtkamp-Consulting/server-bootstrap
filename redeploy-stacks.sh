@@ -118,7 +118,7 @@ if [[ -n "$REF" ]]; then
 fi
 
 RESPONSE_FILE=$(mktemp)
-HTTP=$(curl -sSk -X POST \
+HTTP=$(curl -sSk -X PUT \
     -o "$RESPONSE_FILE" -w "%{http_code}" \
     -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
     -H "Content-Type: application/json" \
