@@ -448,7 +448,7 @@ for i in "${!DEPLOY_REPOS[@]}"; do
             ((.imports // []) | .[].secrets[]?),
             (.secrets // [])[]
         ] | reduce .[] as $secret ({};
-            .[$secret.secretKey] = $secret.secretValue
+            .[$secret.secretKey] = ($secret.secretValue | gsub("\n"; "\\n"))
         ) | to_entries | map({name: .key, value: .value})')
     ok "  Loaded $(echo "$ENV_JSON" | jq 'length') secret(s)"
 
