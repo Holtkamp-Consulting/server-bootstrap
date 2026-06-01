@@ -16,10 +16,11 @@
 #
 #   Infisical-Projekt "github-runner" (runner-spezifische Secrets):
 #     APP_ID                GitHub App ID
-#     APP_PRIVATE_KEY       GitHub App Private Key im PEM-Format
-#     APP_LOGIN             GitHub App/Login-Kontext, z.B. Org-Name
 #     RUNNER_NAME           Eindeutiger Runner-Name, z.B. prod-runner
 #     RUNNER_LABELS         Komma-getrennte Labels, z.B. portainer,prod
+#
+#   APP_PRIVATE_KEY wird von install.sh abgefragt und in
+#   /etc/infisical-deploy.env gespeichert — nicht in Infisical.
 
 services:
   runner:
