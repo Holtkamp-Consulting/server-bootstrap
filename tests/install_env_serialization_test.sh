@@ -70,4 +70,26 @@ assert_eq \
     "$normalized_escaped_pem" \
     'escaped private key newlines become real newlines'
 
+# ── Portainer endpoint ID detection ──────────────────────────────────────────
+
+ENDPOINT_JQ='if type == "array" then .[0].Id else .value[0].Id end'
+
+plain_array='[{"Id": 1, "Name": "local"}]'
+assert_eq \
+    "1" \
+    "$(printf '%s' "$plain_array" | jq "$ENDPOINT_JQ")" \
+    'endpoint ID extracted from plain array response'
+
+paginated='{"value": [{"Id": 2, "Name": "local"}], "totalCount": 1}'
+assert_eq \
+    "2" \
+    "$(printf '%s' "$paginated" | jq "$ENDPOINT_JQ")" \
+    'endpoint ID extracted from paginated response'
+
+empty_array='[]'
+assert_eq \
+    "null" \
+    "$(printf '%s' "$empty_array" | jq "$ENDPOINT_JQ")" \
+    'empty array returns null (triggers error path)'
+
 printf 'PASS: install env serialization\n'

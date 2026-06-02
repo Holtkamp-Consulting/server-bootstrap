@@ -322,9 +322,13 @@ fi
 ok "Portainer token refreshed"
 
 # Portainer local endpoint ID
-ENDPOINT_ID=$(curl -sfk \
+# Older Portainer versions return a plain array [...]; newer versions return
+# a paginated object {"value": [...], "totalCount": n}. Handle both.
+ENDPOINT_RESPONSE=$(curl -sfk \
     -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
-    "${PORTAINER_URL}/api/endpoints" | jq '.[0].Id')
+    "${PORTAINER_URL}/api/endpoints" 2>/dev/null || true)
+ENDPOINT_ID=$(printf '%s' "$ENDPOINT_RESPONSE" | \
+    jq 'if type == "array" then .[0].Id else .value[0].Id end' 2>/dev/null || true)
 
 if [ -z "$ENDPOINT_ID" ] || [ "$ENDPOINT_ID" = "null" ]; then
     err "Could not determine Portainer endpoint ID"
