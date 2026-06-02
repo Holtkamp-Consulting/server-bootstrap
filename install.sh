@@ -99,6 +99,49 @@ require_value() {
     fi
 }
 
+extract_portainer_endpoint_id() {
+    jq -r '
+        def endpoint_list:
+            if type == "array" then .
+            elif type == "object" and (.Id != null) then [.]
+            elif type == "object" and (.value | type == "array") then .value
+            elif type == "object" and (.items | type == "array") then .items
+            elif type == "object" and (.Items | type == "array") then .Items
+            else []
+            end;
+
+        endpoint_list
+        | map(select(.Id != null))
+        | (
+            map(select(((.Type // "") | tostring) == "1" and (.URL // "") == "unix:///var/run/docker.sock"))
+            + map(select(((.Name // "") | ascii_downcase) == "local"))
+            + .
+        )
+        | .[0].Id // empty
+    ' 2>/dev/null
+}
+
+create_local_portainer_endpoint() {
+    local response_file http endpoint_id
+
+    response_file=$(mktemp)
+    http=$(curl -sk -o "$response_file" -w "%{http_code}" -X POST \
+        -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+        -F "Name=local" \
+        -F "EndpointCreationType=1" \
+        "${PORTAINER_URL}/api/endpoints" 2>/dev/null || echo "000")
+
+    endpoint_id=$(extract_portainer_endpoint_id < "$response_file" || true)
+    rm -f "$response_file"
+
+    if [[ "$http" =~ ^20[01]$ ]] && [ -n "$endpoint_id" ]; then
+        printf '%s' "$endpoint_id"
+        return 0
+    fi
+
+    return 1
+}
+
 PORTAINER_ADMIN="admin"
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
@@ -327,13 +370,18 @@ ok "Portainer token refreshed"
 ENDPOINT_RESPONSE=$(curl -sfk \
     -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
     "${PORTAINER_URL}/api/endpoints" 2>/dev/null || true)
-ENDPOINT_ID=$(printf '%s' "$ENDPOINT_RESPONSE" | \
-    jq 'if type == "array" then .[0].Id else .value[0].Id end' 2>/dev/null || true)
+ENDPOINT_ID=$(printf '%s' "$ENDPOINT_RESPONSE" | extract_portainer_endpoint_id || true)
 
-if [ -z "$ENDPOINT_ID" ] || [ "$ENDPOINT_ID" = "null" ]; then
-    err "Could not determine Portainer endpoint ID"
+if [ -z "$ENDPOINT_ID" ]; then
+    log "No Portainer endpoint found — creating local Docker endpoint..."
+    ENDPOINT_ID=$(create_local_portainer_endpoint || true)
+fi
+
+if [ -z "$ENDPOINT_ID" ]; then
+    err "Could not determine or create Portainer endpoint ID"
     exit 1
 fi
+ok "Using Portainer endpoint ID ${ENDPOINT_ID}"
 
 # GitHub repos auflisten
 log "Fetching GitHub repositories..."
