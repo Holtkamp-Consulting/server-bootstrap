@@ -7,6 +7,8 @@ eval "$(
     awk '
         /^normalize_private_key\(\) \{/ { capture = 1 }
         /^quote_env_value\(\) \{/ { capture = 1 }
+        /^extract_portainer_endpoint_id\(\) \{/ { capture = 1 }
+        /^create_local_portainer_endpoint\(\) \{/ { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
     ' "$ROOT_DIR/install.sh"
@@ -24,7 +26,8 @@ assert_eq() {
 }
 
 tmp_env="$(mktemp)"
-trap 'rm -f "$tmp_env"' EXIT
+tmp_bin="$(mktemp -d)"
+trap 'rm -f "$tmp_env"; rm -rf "$tmp_bin"' EXIT
 
 private_key_raw=$'BEGIN TEST KEY\nline with spaces\nEND TEST KEY'
 private_key="$(normalize_private_key "$private_key_raw")"
@@ -72,24 +75,66 @@ assert_eq \
 
 # ── Portainer endpoint ID detection ──────────────────────────────────────────
 
-ENDPOINT_JQ='if type == "array" then .[0].Id else .value[0].Id end'
-
 plain_array='[{"Id": 1, "Name": "local"}]'
 assert_eq \
     "1" \
-    "$(printf '%s' "$plain_array" | jq "$ENDPOINT_JQ")" \
+    "$(printf '%s' "$plain_array" | extract_portainer_endpoint_id)" \
     'endpoint ID extracted from plain array response'
 
 paginated='{"value": [{"Id": 2, "Name": "local"}], "totalCount": 1}'
 assert_eq \
     "2" \
-    "$(printf '%s' "$paginated" | jq "$ENDPOINT_JQ")" \
+    "$(printf '%s' "$paginated" | extract_portainer_endpoint_id)" \
     'endpoint ID extracted from paginated response'
+
+items_response='{"items": [{"Id": 3, "Name": "local"}], "totalCount": 1}'
+assert_eq \
+    "3" \
+    "$(printf '%s' "$items_response" | extract_portainer_endpoint_id)" \
+    'endpoint ID extracted from items response'
+
+created_endpoint='{"Id": 6, "Name": "local", "Type": 1, "URL": "unix:///var/run/docker.sock"}'
+assert_eq \
+    "6" \
+    "$(printf '%s' "$created_endpoint" | extract_portainer_endpoint_id)" \
+    'endpoint ID extracted from single endpoint object'
+
+multiple_endpoints='[{"Id": 4, "Name": "remote", "Type": 1, "URL": "tcp://host:2375"}, {"Id": 5, "Name": "docker", "Type": 1, "URL": "unix:///var/run/docker.sock"}]'
+assert_eq \
+    "5" \
+    "$(printf '%s' "$multiple_endpoints" | extract_portainer_endpoint_id)" \
+    'local Docker socket endpoint is preferred'
 
 empty_array='[]'
 assert_eq \
-    "null" \
-    "$(printf '%s' "$empty_array" | jq "$ENDPOINT_JQ")" \
-    'empty array returns null (triggers error path)'
+    "" \
+    "$(printf '%s' "$empty_array" | extract_portainer_endpoint_id)" \
+    'empty array returns empty value (triggers create path)'
+
+cat > "$tmp_bin/curl" <<'EOF'
+#!/bin/bash
+output_file=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o)
+            output_file="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+printf '{"Id": 7, "Name": "local", "Type": 1, "URL": "unix:///var/run/docker.sock"}' > "$output_file"
+printf '201'
+EOF
+chmod +x "$tmp_bin/curl"
+
+PATH="$tmp_bin:$PATH" PORTAINER_TOKEN="test-token" PORTAINER_URL="https://portainer.test"
+assert_eq \
+    "7" \
+    "$(create_local_portainer_endpoint)" \
+    'local endpoint creation returns created endpoint ID'
 
 printf 'PASS: install env serialization\n'
