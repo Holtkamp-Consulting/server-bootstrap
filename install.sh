@@ -131,6 +131,7 @@ fi
 # ── Dependencies ───────────────────────────────────────────────────────────────
 if ! command -v jq &>/dev/null; then
     log "Installing jq..."
+    sudo apt-get update -qq >/dev/null
     sudo apt-get install -y -qq jq >/dev/null
     ok "jq installed"
 fi
