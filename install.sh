@@ -616,6 +616,7 @@ echo ""
 log "Deploying ${#DEPLOY_REPOS[@]} stack(s) authorized by the Infisical Machine Identity"
 
 # Repos deployen, für die ein gleichnamiges Infisical-Projekt sichtbar ist.
+SKIPPED_STACKS=()
 for i in "${!DEPLOY_REPOS[@]}"; do
     REPO="${DEPLOY_REPOS[$i]}"
     STACK_PROJECT_ID="${DEPLOY_PROJECT_IDS[$i]}"
@@ -635,10 +636,19 @@ for i in "${!DEPLOY_REPOS[@]}"; do
     SECRETS_JSON=$(printf '%s\n' "$SECRETS_RESPONSE" | sed '1d')
 
     if [ "$SECRETS_HTTP" != "200" ] || ! echo "$SECRETS_JSON" | jq -e '.secrets | type == "array"' >/dev/null 2>&1; then
-        err "Failed to fetch Infisical secrets for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP})"
-        err "Project: ${STACK_PROJECT_NAME} (${STACK_PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
-        err "$(echo "$SECRETS_JSON" | head -c 500)"
-        exit 1
+        # Auth-Fehler sind global (falsche Machine Identity) → hart abbrechen.
+        if [ "$SECRETS_HTTP" = "401" ] || [ "$SECRETS_HTTP" = "403" ]; then
+            err "Infisical authentication/authorization failed for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP})"
+            err "Project: ${STACK_PROJECT_NAME} (${STACK_PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
+            err "$(echo "$SECRETS_JSON" | head -c 500)"
+            exit 1
+        fi
+        # Fehlende Umgebung/Pfad (404/400/…) betrifft nur diesen Stack → überspringen, Loop läuft weiter.
+        warn "No Infisical secrets for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP}) — skipping"
+        warn "Project: ${STACK_PROJECT_NAME} (${STACK_PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
+        warn "$(echo "$SECRETS_JSON" | head -c 500)"
+        SKIPPED_STACKS+=("$STACK_NAME")
+        continue
     fi
 
     ENV_JSON=$(echo "$SECRETS_JSON" \
@@ -738,6 +748,10 @@ for i in "${!DEPLOY_REPOS[@]}"; do
         ok "Stack '$STACK_NAME' created and deployed"
     fi
 done
+
+if [ "${#SKIPPED_STACKS[@]}" -gt 0 ]; then
+    warn "Skipped ${#SKIPPED_STACKS[@]} stack(s) without Infisical secrets: ${SKIPPED_STACKS[*]}"
+fi
 
 # ── 7. Redeploy script ────────────────────────────────────────────────────────
 log "Step 7/7 — Installing redeploy-stacks.sh"
