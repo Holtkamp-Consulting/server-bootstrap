@@ -170,8 +170,8 @@ ensure_ghcr_registry() {
 
     payload=$(jq -n \
         --arg url "ghcr.io" \
-        --arg user "$GHCR_USERNAME" \
-        --arg pass "$GHCR_TOKEN" \
+        --arg user "${GHCR_USERNAME:-}" \
+        --arg pass "${GHCR_TOKEN:-}" \
         '{Name: "ghcr.io", Type: 3, URL: $url, Authentication: true, Username: $user, Password: $pass}')
 
     response_file=$(mktemp)

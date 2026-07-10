@@ -32,7 +32,7 @@ Optional environment variables to override default ports:
 PORTAINER_PORT_HTTP=9000 PORTAINER_PORT_HTTPS=9443 bash install.sh
 ```
 
-Credentials are stored in `/etc/infisical-deploy.env` with mode `600`. Re-running the installer reuses this config. When GHCR credentials are supplied, `GHCR_USERNAME` and `GHCR_TOKEN` are stored here as well, and the installer creates a Custom `ghcr.io` registry in Portainer (type Custom, URL `ghcr.io`) so private `ghcr.io/holtkamp-consulting/*` images are pulled automatically during stack deploys. The registry persists in the `portainer_data` volume, so later redeploys reuse it. To enable this for a pre-existing install, add `GHCR_USERNAME` and `GHCR_TOKEN` to `/etc/infisical-deploy.env` and re-run the installer.
+Credentials are stored in `/etc/infisical-deploy.env`, owned by `root:docker` with mode `640` (the `docker` group can read it so the runner container can mount it read-only — see [Setting up the GitHub Actions runner](#setting-up-the-github-actions-runner)). Re-running the installer reuses this config. When GHCR credentials are supplied, `GHCR_USERNAME` and `GHCR_TOKEN` are stored here as well, and the installer creates a Custom `ghcr.io` registry in Portainer (type Custom, URL `ghcr.io`) so private `ghcr.io/holtkamp-consulting/*` images are pulled automatically during stack deploys. The registry persists in the `portainer_data` volume, so later redeploys reuse it. To enable this for a pre-existing install, add `GHCR_USERNAME` and `GHCR_TOKEN` to `/etc/infisical-deploy.env` and re-run the installer.
 
 No Infisical project ID is configured manually. The configured Infisical URL must expose the API endpoint `/api/v1/projects` for the Machine Identity token.
 
