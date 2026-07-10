@@ -195,12 +195,15 @@ printf '201'
 EOF
 chmod +x "$tmp_bin/curl"
 
+# The GitHub login → registry username derivation happens before the
+# registry-ensure step, so ensure_ghcr_registry itself only needs a pre-derived
+# GHCR_USERNAME plus GITHUB_TOKEN (reused as the ghcr.io password).
 registry_created_http=$(
     PATH="$tmp_bin:$PATH" \
     PORTAINER_TOKEN="test-token" \
     PORTAINER_URL="https://portainer.test" \
     GHCR_USERNAME="ghcr-user" \
-    GHCR_TOKEN="ghcr-pat" \
+    GITHUB_TOKEN="gh-token" \
     ensure_ghcr_registry; echo "$?"
 )
 assert_eq \

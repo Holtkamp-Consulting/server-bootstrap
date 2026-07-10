@@ -168,10 +168,13 @@ ensure_ghcr_registry() {
         "${PORTAINER_URL}/api/registries" 2>/dev/null \
         | extract_portainer_registry_id || true)
 
+    # Reuse the GitHub token collected during install as the ghcr.io credential.
+    # Portainer requires a non-empty username; fall back to the literal "token"
+    # (a valid GHCR username when authenticating with a PAT) if none was derived.
     payload=$(jq -n \
         --arg url "ghcr.io" \
-        --arg user "${GHCR_USERNAME:-}" \
-        --arg pass "${GHCR_TOKEN:-}" \
+        --arg user "${GHCR_USERNAME:-token}" \
+        --arg pass "$GITHUB_TOKEN" \
         '{Name: "ghcr.io", Type: 3, URL: $url, Authentication: true, Username: $user, Password: $pass}')
 
     response_file=$(mktemp)
@@ -371,7 +374,8 @@ else
     fi
 
     echo ""
-    log "GitHub Personal Access Token (needs repo scope):"
+    log "GitHub Personal Access Token (needs 'repo' and 'read:packages' scopes):"
+    log "  read:packages lets Portainer pull private ghcr.io/holtkamp-consulting/* images."
     prompt_secret "  GitHub Token: " GITHUB_TOKEN
     require_value "$GITHUB_TOKEN" "GitHub token"
 
@@ -379,12 +383,6 @@ else
     prompt_multiline_secret "  APP_PRIVATE_KEY" APP_PRIVATE_KEY_RAW
     require_value "$APP_PRIVATE_KEY_RAW" "APP_PRIVATE_KEY"
     APP_PRIVATE_KEY="$(normalize_private_key "$APP_PRIVATE_KEY_RAW")"
-
-    echo ""
-    log "GHCR (GitHub Container Registry) credentials for pulling private ghcr.io images."
-    log "Leave blank to skip (only needed if a stack uses private ghcr.io/holtkamp-consulting/* images)."
-    prompt_input  "  GHCR Username (GitHub user/bot):             " GHCR_USERNAME
-    prompt_secret "  GHCR Token (classic PAT, read:packages):    " GHCR_TOKEN
 
     log "Fetching Portainer API token..."
     AUTH_PAYLOAD=$(jq -n \
@@ -412,8 +410,6 @@ else
         printf 'PORTAINER_TOKEN=%s\n' "$(quote_env_value "$PORTAINER_JWT")"
         printf 'GITHUB_TOKEN=%s\n' "$(quote_env_value "$GITHUB_TOKEN")"
         printf 'APP_PRIVATE_KEY=%s\n' "$(quote_env_value "$APP_PRIVATE_KEY")"
-        printf 'GHCR_USERNAME=%s\n' "$(quote_env_value "${GHCR_USERNAME:-}")"
-        printf 'GHCR_TOKEN=%s\n' "$(quote_env_value "${GHCR_TOKEN:-}")"
     } | sudo tee "$DEPLOY_CONFIG" > /dev/null
     sudo chown root:docker "$DEPLOY_CONFIG"
     sudo chmod 640 "$DEPLOY_CONFIG"
@@ -462,13 +458,16 @@ ok "Using Portainer endpoint ID ${ENDPOINT_ID}"
 
 # Ensure a Portainer registry credential exists for ghcr.io so private
 # ghcr.io/holtkamp-consulting/* images can be pulled during stack deploys.
-if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
-    log "Ensuring GHCR registry credential in Portainer..."
-    ensure_ghcr_registry || true
-else
-    warn "GHCR credentials not set — skipping ghcr.io registry setup"
-    warn "Private ghcr.io images will fail to pull. Set GHCR_USERNAME and GHCR_TOKEN in $DEPLOY_CONFIG to enable."
-fi
+# The GitHub token is always present, so this runs unconditionally. Derive the
+# GitHub login for the registry username via /user; fall back to "token" (a
+# valid GHCR username for PAT auth) if the lookup fails or returns nothing.
+GHCR_USERNAME=$(curl -sf \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/user" 2>/dev/null | jq -r '.login // empty' || true)
+GHCR_USERNAME="${GHCR_USERNAME:-token}"
+log "Ensuring GHCR registry credential in Portainer..."
+ensure_ghcr_registry || true
 
 # GitHub repos auflisten
 log "Fetching GitHub repositories..."

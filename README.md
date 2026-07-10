@@ -8,7 +8,7 @@ One-liner setup script for Raspberry Pi and other Linux servers. Installs Docker
 curl -fsSL https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/install.sh -o install.sh && bash install.sh
 ```
 
-During the first installation you will be prompted for Infisical Machine Identity credentials and a GitHub token. You are also optionally prompted for GHCR (GitHub Container Registry) credentials — a GitHub username and a classic PAT with the `read:packages` scope — used to pull private `ghcr.io/holtkamp-consulting/*` images. Leave them blank to skip; they are only needed if a stack deploys private `ghcr.io` images (public images, such as the runner, are unaffected). The Portainer admin password is generated automatically and displayed at the end.
+During the first installation you will be prompted for Infisical Machine Identity credentials and a GitHub token. The GitHub token needs both the `repo` and `read:packages` scopes — `read:packages` lets Portainer pull private `ghcr.io/holtkamp-consulting/*` images. The Portainer admin password is generated automatically and displayed at the end.
 
 ## What it installs
 
@@ -32,7 +32,7 @@ Optional environment variables to override default ports:
 PORTAINER_PORT_HTTP=9000 PORTAINER_PORT_HTTPS=9443 bash install.sh
 ```
 
-Credentials are stored in `/etc/infisical-deploy.env`, owned by `root:docker` with mode `640` (the `docker` group can read it so the runner container can mount it read-only — see [Setting up the GitHub Actions runner](#setting-up-the-github-actions-runner)). Re-running the installer reuses this config. When GHCR credentials are supplied, `GHCR_USERNAME` and `GHCR_TOKEN` are stored here as well, and the installer creates a Custom `ghcr.io` registry in Portainer (type Custom, URL `ghcr.io`) so private `ghcr.io/holtkamp-consulting/*` images are pulled automatically during stack deploys. The registry persists in the `portainer_data` volume, so later redeploys reuse it. To enable this for a pre-existing install, add `GHCR_USERNAME` and `GHCR_TOKEN` to `/etc/infisical-deploy.env` and re-run the installer.
+Credentials are stored in `/etc/infisical-deploy.env`, owned by `root:docker` with mode `640` (the `docker` group can read it so the runner container can mount it read-only — see [Setting up the GitHub Actions runner](#setting-up-the-github-actions-runner)). Re-running the installer reuses this config. The single GitHub token (with `repo` + `read:packages` scopes) is reused to create a Custom `ghcr.io` registry in Portainer (type Custom, URL `ghcr.io`) — the installer derives the registry username from the token's GitHub login — so private `ghcr.io/holtkamp-consulting/*` images are pulled automatically during stack deploys. The registry persists in the `portainer_data` volume, so later redeploys reuse it.
 
 No Infisical project ID is configured manually. The configured Infisical URL must expose the API endpoint `/api/v1/projects` for the Machine Identity token.
 
