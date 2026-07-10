@@ -89,6 +89,18 @@ def env_secret_value($key):
 ] | reduce .[] as $s ({}; .[$s.secretKey] = ($s.secretValue | env_secret_value($s.secretKey)))
   | to_entries | map({name: .key, value: .value})')
 
+# Default the compose IMAGE_TAG to the branch moving-tag (dev/main) that the app
+# CI publishes to GHCR. Without this, compose's ${IMAGE_TAG:-latest} resolves to
+# :latest — which is only published on main (see focus/.github/workflows/deploy.yml)
+# — so dev deploys fail with "ghcr.io/.../<svc>:latest: not found". An explicit
+# IMAGE_TAG from Infisical wins (e.g. to pin a specific SHA).
+REF_BRANCH="${REF#refs/heads/}"
+REF_BRANCH="${REF_BRANCH#refs/tags/}"
+if [[ -n "$REF_BRANCH" ]] && ! echo "$ENV_JSON" | jq -e 'any(.[]; .name == "IMAGE_TAG")' >/dev/null; then
+    ENV_JSON=$(echo "$ENV_JSON" | jq --arg tag "$REF_BRANCH" \
+        '. + [{name: "IMAGE_TAG", value: $tag}]')
+fi
+
 if [[ "$STACK_NAME" == "github-runner" ]]; then
     [[ -z "${APP_PRIVATE_KEY:-}" ]] && { echo "APP_PRIVATE_KEY missing from deploy config"; exit 1; }
     APP_PRIVATE_KEY_B64="$(printf '%s' "$APP_PRIVATE_KEY" | base64 | tr -d '\n')"
