@@ -142,6 +142,78 @@ create_local_portainer_endpoint() {
     return 1
 }
 
+extract_portainer_registry_id() {
+    jq -r '
+        def registry_list:
+            if type == "array" then .
+            elif type == "object" and (.Id != null) then [.]
+            elif type == "object" and (.value | type == "array") then .value
+            elif type == "object" and (.items | type == "array") then .items
+            elif type == "object" and (.Items | type == "array") then .Items
+            else []
+            end;
+
+        registry_list
+        | map(select(.Id != null))
+        | map(select((.URL // "") == "ghcr.io"))
+        | .[0].Id // empty
+    ' 2>/dev/null
+}
+
+ensure_ghcr_registry() {
+    local response_file http registry_id payload
+
+    registry_id=$(curl -sfk \
+        -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+        "${PORTAINER_URL}/api/registries" 2>/dev/null \
+        | extract_portainer_registry_id || true)
+
+    # Reuse the GitHub token collected during install as the ghcr.io credential.
+    # Portainer requires a non-empty username; fall back to the literal "token"
+    # (a valid GHCR username when authenticating with a PAT) if none was derived.
+    payload=$(jq -n \
+        --arg url "ghcr.io" \
+        --arg user "${GHCR_USERNAME:-token}" \
+        --arg pass "$GITHUB_TOKEN" \
+        '{Name: "ghcr.io", Type: 3, URL: $url, Authentication: true, Username: $user, Password: $pass}')
+
+    response_file=$(mktemp)
+    if [ -n "$registry_id" ]; then
+        http=$(curl -sSk -X PUT \
+            -o "$response_file" \
+            -w "%{http_code}" \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/registries/${registry_id}" \
+            -d "$payload" 2>/dev/null || true)
+    else
+        http=$(curl -sSk -X POST \
+            -o "$response_file" \
+            -w "%{http_code}" \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/registries" \
+            -d "$payload" 2>/dev/null || true)
+    fi
+    http="${http:-000}"
+
+    if [[ "$http" =~ ^20[01]$ ]]; then
+        rm -f "$response_file"
+        ok "GHCR registry ensured in Portainer"
+        return 0
+    fi
+    if [ "$http" = "409" ]; then
+        rm -f "$response_file"
+        ok "GHCR registry already present in Portainer"
+        return 0
+    fi
+
+    warn "Could not ensure GHCR registry (HTTP ${http}); private ghcr.io pulls may fail"
+    warn "$(head -c 500 "$response_file")"
+    rm -f "$response_file"
+    return 1
+}
+
 PORTAINER_ADMIN="admin"
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
@@ -302,7 +374,8 @@ else
     fi
 
     echo ""
-    log "GitHub Personal Access Token (needs repo scope):"
+    log "GitHub Personal Access Token (needs 'repo' and 'read:packages' scopes):"
+    log "  read:packages lets Portainer pull private ghcr.io/holtkamp-consulting/* images."
     prompt_secret "  GitHub Token: " GITHUB_TOKEN
     require_value "$GITHUB_TOKEN" "GitHub token"
 
@@ -382,6 +455,19 @@ if [ -z "$ENDPOINT_ID" ]; then
     exit 1
 fi
 ok "Using Portainer endpoint ID ${ENDPOINT_ID}"
+
+# Ensure a Portainer registry credential exists for ghcr.io so private
+# ghcr.io/holtkamp-consulting/* images can be pulled during stack deploys.
+# The GitHub token is always present, so this runs unconditionally. Derive the
+# GitHub login for the registry username via /user; fall back to "token" (a
+# valid GHCR username for PAT auth) if the lookup fails or returns nothing.
+GHCR_USERNAME=$(curl -sf \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/user" 2>/dev/null | jq -r '.login // empty' || true)
+GHCR_USERNAME="${GHCR_USERNAME:-token}"
+log "Ensuring GHCR registry credential in Portainer..."
+ensure_ghcr_registry || true
 
 # GitHub repos auflisten
 log "Fetching GitHub repositories..."
