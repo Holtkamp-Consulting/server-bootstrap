@@ -9,6 +9,8 @@ eval "$(
         /^quote_env_value\(\) \{/ { capture = 1 }
         /^extract_portainer_endpoint_id\(\) \{/ { capture = 1 }
         /^create_local_portainer_endpoint\(\) \{/ { capture = 1 }
+        /^extract_portainer_registry_id\(\) \{/ { capture = 1 }
+        /^ensure_ghcr_registry\(\) \{/ { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
     ' "$ROOT_DIR/install.sh"
@@ -136,5 +138,74 @@ assert_eq \
     "7" \
     "$(create_local_portainer_endpoint)" \
     'local endpoint creation returns created endpoint ID'
+
+# ── Portainer GHCR registry ID detection ─────────────────────────────────────
+
+registry_plain_array='[{"Id": 9, "Name": "ghcr", "URL": "ghcr.io"}]'
+assert_eq \
+    "9" \
+    "$(printf '%s' "$registry_plain_array" | extract_portainer_registry_id)" \
+    'registry ID extracted from plain array response'
+
+registry_paginated='{"value": [{"Id": 10, "URL": "ghcr.io"}], "totalCount": 1}'
+assert_eq \
+    "10" \
+    "$(printf '%s' "$registry_paginated" | extract_portainer_registry_id)" \
+    'registry ID extracted from paginated response'
+
+registry_no_ghcr='[{"Id": 1, "URL": "docker.io"}]'
+assert_eq \
+    "" \
+    "$(printf '%s' "$registry_no_ghcr" | extract_portainer_registry_id)" \
+    'no ghcr.io registry returns empty value (triggers create path)'
+
+registry_empty_array='[]'
+assert_eq \
+    "" \
+    "$(printf '%s' "$registry_empty_array" | extract_portainer_registry_id)" \
+    'empty registry array returns empty value'
+
+# ── ensure_ghcr_registry create path (mocked curl) ───────────────────────────
+
+# ensure_ghcr_registry logs via ok/warn, which are not extracted by the harness.
+ok()   { :; }
+warn() { :; }
+
+cat > "$tmp_bin/curl" <<'EOF'
+#!/bin/bash
+method="GET"
+output_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        -X) method="${args[$((i + 1))]}" ;;
+        -o) output_file="${args[$((i + 1))]}" ;;
+    esac
+done
+
+if [ "$method" = "GET" ]; then
+    # GET /api/registries → no ghcr.io registry yet (create path)
+    printf '[]'
+    exit 0
+fi
+
+# POST /api/registries → created
+[ -n "$output_file" ] && printf '{"Id": 11, "URL": "ghcr.io"}' > "$output_file"
+printf '201'
+EOF
+chmod +x "$tmp_bin/curl"
+
+registry_created_http=$(
+    PATH="$tmp_bin:$PATH" \
+    PORTAINER_TOKEN="test-token" \
+    PORTAINER_URL="https://portainer.test" \
+    GHCR_USERNAME="ghcr-user" \
+    GHCR_TOKEN="ghcr-pat" \
+    ensure_ghcr_registry; echo "$?"
+)
+assert_eq \
+    "0" \
+    "$registry_created_http" \
+    'ensure_ghcr_registry succeeds on HTTP 201 create path'
 
 printf 'PASS: install env serialization\n'

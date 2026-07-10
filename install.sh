@@ -142,6 +142,75 @@ create_local_portainer_endpoint() {
     return 1
 }
 
+extract_portainer_registry_id() {
+    jq -r '
+        def registry_list:
+            if type == "array" then .
+            elif type == "object" and (.Id != null) then [.]
+            elif type == "object" and (.value | type == "array") then .value
+            elif type == "object" and (.items | type == "array") then .items
+            elif type == "object" and (.Items | type == "array") then .Items
+            else []
+            end;
+
+        registry_list
+        | map(select(.Id != null))
+        | map(select((.URL // "") == "ghcr.io"))
+        | .[0].Id // empty
+    ' 2>/dev/null
+}
+
+ensure_ghcr_registry() {
+    local response_file http registry_id payload
+
+    registry_id=$(curl -sfk \
+        -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+        "${PORTAINER_URL}/api/registries" 2>/dev/null \
+        | extract_portainer_registry_id || true)
+
+    payload=$(jq -n \
+        --arg url "ghcr.io" \
+        --arg user "$GHCR_USERNAME" \
+        --arg pass "$GHCR_TOKEN" \
+        '{Name: "ghcr.io", Type: 3, URL: $url, Authentication: true, Username: $user, Password: $pass}')
+
+    response_file=$(mktemp)
+    if [ -n "$registry_id" ]; then
+        http=$(curl -sSk -X PUT \
+            -o "$response_file" \
+            -w "%{http_code}" \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/registries/${registry_id}" \
+            -d "$payload" 2>/dev/null || true)
+    else
+        http=$(curl -sSk -X POST \
+            -o "$response_file" \
+            -w "%{http_code}" \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${PORTAINER_URL}/api/registries" \
+            -d "$payload" 2>/dev/null || true)
+    fi
+    http="${http:-000}"
+
+    if [[ "$http" =~ ^20[01]$ ]]; then
+        rm -f "$response_file"
+        ok "GHCR registry ensured in Portainer"
+        return 0
+    fi
+    if [ "$http" = "409" ]; then
+        rm -f "$response_file"
+        ok "GHCR registry already present in Portainer"
+        return 0
+    fi
+
+    warn "Could not ensure GHCR registry (HTTP ${http}); private ghcr.io pulls may fail"
+    warn "$(head -c 500 "$response_file")"
+    rm -f "$response_file"
+    return 1
+}
+
 PORTAINER_ADMIN="admin"
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
@@ -311,6 +380,12 @@ else
     require_value "$APP_PRIVATE_KEY_RAW" "APP_PRIVATE_KEY"
     APP_PRIVATE_KEY="$(normalize_private_key "$APP_PRIVATE_KEY_RAW")"
 
+    echo ""
+    log "GHCR (GitHub Container Registry) credentials for pulling private ghcr.io images."
+    log "Leave blank to skip (only needed if a stack uses private ghcr.io/holtkamp-consulting/* images)."
+    prompt_input  "  GHCR Username (GitHub user/bot):             " GHCR_USERNAME
+    prompt_secret "  GHCR Token (classic PAT, read:packages):    " GHCR_TOKEN
+
     log "Fetching Portainer API token..."
     AUTH_PAYLOAD=$(jq -n \
         --arg username "$PORTAINER_ADMIN" \
@@ -337,6 +412,8 @@ else
         printf 'PORTAINER_TOKEN=%s\n' "$(quote_env_value "$PORTAINER_JWT")"
         printf 'GITHUB_TOKEN=%s\n' "$(quote_env_value "$GITHUB_TOKEN")"
         printf 'APP_PRIVATE_KEY=%s\n' "$(quote_env_value "$APP_PRIVATE_KEY")"
+        printf 'GHCR_USERNAME=%s\n' "$(quote_env_value "${GHCR_USERNAME:-}")"
+        printf 'GHCR_TOKEN=%s\n' "$(quote_env_value "${GHCR_TOKEN:-}")"
     } | sudo tee "$DEPLOY_CONFIG" > /dev/null
     sudo chown root:docker "$DEPLOY_CONFIG"
     sudo chmod 640 "$DEPLOY_CONFIG"
@@ -382,6 +459,16 @@ if [ -z "$ENDPOINT_ID" ]; then
     exit 1
 fi
 ok "Using Portainer endpoint ID ${ENDPOINT_ID}"
+
+# Ensure a Portainer registry credential exists for ghcr.io so private
+# ghcr.io/holtkamp-consulting/* images can be pulled during stack deploys.
+if [ -n "${GHCR_USERNAME:-}" ] && [ -n "${GHCR_TOKEN:-}" ]; then
+    log "Ensuring GHCR registry credential in Portainer..."
+    ensure_ghcr_registry || true
+else
+    warn "GHCR credentials not set — skipping ghcr.io registry setup"
+    warn "Private ghcr.io images will fail to pull. Set GHCR_USERNAME and GHCR_TOKEN in $DEPLOY_CONFIG to enable."
+fi
 
 # GitHub repos auflisten
 log "Fetching GitHub repositories..."

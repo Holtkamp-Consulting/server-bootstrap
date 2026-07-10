@@ -8,7 +8,7 @@ One-liner setup script for Raspberry Pi and other Linux servers. Installs Docker
 curl -fsSL https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/install.sh -o install.sh && bash install.sh
 ```
 
-During the first installation you will be prompted for Infisical Machine Identity credentials and a GitHub token. The Portainer admin password is generated automatically and displayed at the end.
+During the first installation you will be prompted for Infisical Machine Identity credentials and a GitHub token. You are also optionally prompted for GHCR (GitHub Container Registry) credentials — a GitHub username and a classic PAT with the `read:packages` scope — used to pull private `ghcr.io/holtkamp-consulting/*` images. Leave them blank to skip; they are only needed if a stack deploys private `ghcr.io` images (public images, such as the runner, are unaffected). The Portainer admin password is generated automatically and displayed at the end.
 
 ## What it installs
 
@@ -32,7 +32,7 @@ Optional environment variables to override default ports:
 PORTAINER_PORT_HTTP=9000 PORTAINER_PORT_HTTPS=9443 bash install.sh
 ```
 
-Credentials are stored in `/etc/infisical-deploy.env` with mode `600`. Re-running the installer reuses this config.
+Credentials are stored in `/etc/infisical-deploy.env` with mode `600`. Re-running the installer reuses this config. When GHCR credentials are supplied, `GHCR_USERNAME` and `GHCR_TOKEN` are stored here as well, and the installer creates a Custom `ghcr.io` registry in Portainer (type Custom, URL `ghcr.io`) so private `ghcr.io/holtkamp-consulting/*` images are pulled automatically during stack deploys. The registry persists in the `portainer_data` volume, so later redeploys reuse it. To enable this for a pre-existing install, add `GHCR_USERNAME` and `GHCR_TOKEN` to `/etc/infisical-deploy.env` and re-run the installer.
 
 No Infisical project ID is configured manually. The configured Infisical URL must expose the API endpoint `/api/v1/projects` for the Machine Identity token.
 
