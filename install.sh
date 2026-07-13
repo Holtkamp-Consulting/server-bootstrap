@@ -417,6 +417,28 @@ else
     ok "Credentials saved to $DEPLOY_CONFIG"
 fi
 
+# ── Image tag resolution ──────────────────────────────────────────────────────
+# Map the Infisical environment to the git branch whose images this host runs:
+# a dev host runs the repo's `dev` branch, prod/staging run `main`. Mirrors the
+# branch→environment routing in templates/stack-deploy.yml (main→prod, dev→dev).
+deploy_branch_for_env() {
+    case "$1" in
+        dev) printf 'dev' ;;
+        *)   printf 'main' ;;
+    esac
+}
+
+# Print the HEAD commit SHA of branch $2 in repo $1 via the GitHub API, or
+# nothing if the branch does not exist or the call fails.
+github_branch_head_sha() {
+    local repo="$1" branch="$2"
+    curl -sf \
+        -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${repo}/commits/${branch}" 2>/dev/null \
+        | jq -r '.sha // empty' 2>/dev/null || true
+}
+
 # ── 6. Stacks deployen ─────────────────────────────────────────────────────────
 log "Step 6/7 — Stack deployment from GitHub"
 
@@ -682,6 +704,30 @@ for i in "${!DEPLOY_REPOS[@]}"; do
     fi
     ok "  Loaded $(echo "$ENV_JSON" | jq 'length') secret(s)"
 
+    # Pin IMAGE_TAG to the deploy branch's immutable per-commit tag (sha-<sha>,
+    # published by app CI via docker/metadata-action type=sha) so Portainer's
+    # pullImage:true always fetches a fresh image instead of reusing a cached
+    # moving-tag digest — the same fix redeploy-stacks.sh applies for CI-driven
+    # redeploys. Without this, compose's ${IMAGE_TAG:-latest} resolved to :latest
+    # (only published on main), so a dev host silently deployed main images.
+    # An explicit IMAGE_TAG from Infisical still wins.
+    DEPLOY_BRANCH="$(deploy_branch_for_env "${INFISICAL_ENV:-}")"
+    DEPLOY_SHA="$(github_branch_head_sha "$REPO" "$DEPLOY_BRANCH")"
+    if [ -z "$DEPLOY_SHA" ] && [ "$DEPLOY_BRANCH" != "main" ]; then
+        warn "  Repo '$REPO' has no '$DEPLOY_BRANCH' branch — falling back to 'main'"
+        DEPLOY_BRANCH="main"
+        DEPLOY_SHA="$(github_branch_head_sha "$REPO" "$DEPLOY_BRANCH")"
+    fi
+    if echo "$ENV_JSON" | jq -e 'any(.[]; .name == "IMAGE_TAG")' >/dev/null; then
+        log "  IMAGE_TAG pinned by Infisical — leaving as-is"
+    elif [ -n "$DEPLOY_SHA" ]; then
+        ENV_JSON=$(echo "$ENV_JSON" | jq --arg tag "sha-${DEPLOY_SHA}" \
+            '. + [{name: "IMAGE_TAG", value: $tag}]')
+        log "  Pinning IMAGE_TAG=sha-${DEPLOY_SHA} (branch '$DEPLOY_BRANCH')"
+    else
+        warn "  Could not resolve a HEAD sha for '$REPO' — falling back to compose \${IMAGE_TAG:-latest}"
+    fi
+
     # Prüfen ob Stack schon existiert → update vs. create
     EXISTING_ID=$(curl -sfk \
         -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
@@ -727,10 +773,11 @@ for i in "${!DEPLOY_REPOS[@]}"; do
                 --arg repo "https://github.com/${REPO}" \
                 --arg token "$GITHUB_TOKEN" \
                 --argjson env "$ENV_JSON" \
+                --arg ref "refs/heads/${DEPLOY_BRANCH}" \
                 '{
                     name: $name,
                     repositoryURL: $repo,
-                    repositoryReferenceName: "refs/heads/main",
+                    repositoryReferenceName: $ref,
                     filePathInRepository: "docker-compose.yml",
                     repositoryAuthentication: true,
                     repositoryUsername: "token",
