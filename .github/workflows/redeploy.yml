@@ -13,6 +13,20 @@ jobs:
     runs-on: [self-hosted, portainer, "${{ inputs.runner_label }}"]
     steps:
       - name: Redeploy stack on ${{ inputs.runner_label }}
+        # DEPLOY_IMAGE_TAG pins the deploy to the immutable per-commit image tag
+        # (`sha-<sha>`, published by the app's build-push via
+        # docker/metadata-action type=sha,format=long) so Portainer's
+        # pullImage:true always fetches the freshly-built image instead of
+        # reusing the cached digest of a branch moving-tag (dev/main). In a
+        # workflow_call context github.sha is the app commit that triggered the
+        # caller, matching the tag build-push published for that commit.
+        #
+        # Passed as an env var, not a CLI flag: a server still running an older
+        # /opt/deploy/redeploy-stacks.sh (not yet refreshed by install.sh)
+        # ignores the unknown env var but would abort on an unknown flag, so
+        # this stays backward-compatible during a script-version skew.
+        env:
+          DEPLOY_IMAGE_TAG: sha-${{ github.sha }}
         run: |
           /opt/deploy/redeploy-stacks.sh \
             --stack "${{ github.event.repository.name }}" \
