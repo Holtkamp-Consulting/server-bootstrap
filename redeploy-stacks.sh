@@ -129,7 +129,7 @@ fi
 
 # Reads `docker/containers/json` on stdin, prints ".Id .ImageID" for every
 # container belonging to this stack's compose project (case-insensitive match,
-# mirroring the Infisical project match above).
+# like the Infisical project match above).
 stack_project_containers() {
     jq -r --arg name "$STACK_NAME" '
         .[]
@@ -144,11 +144,15 @@ clean_stack_images() {
         "${PORTAINER_URL}/api/stacks/${STACK_ID}/stop?endpointId=${ENDPOINT_ID}" || true
 
     local containers_json rows container_ids image_ids
-    containers_json=$(curl -sSk \
+    # -f so an HTTP 4xx/5xx (expired JWT, proxy hiccup) trips the `|| return 0`
+    # guard instead of handing an error body to the array-indexing jq below.
+    containers_json=$(curl -fsSk \
         -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
         "${PORTAINER_URL}/api/endpoints/${ENDPOINT_ID}/docker/containers/json?all=1") || return 0
 
-    rows=$(printf '%s' "$containers_json" | stack_project_containers)
+    # Guard the parse too: a 200 with an unexpected non-array body makes jq exit
+    # non-zero, which under `set -e` would otherwise abort the whole redeploy.
+    rows=$(printf '%s' "$containers_json" | stack_project_containers) || return 0
     if [[ -z "$rows" ]]; then
         echo "No containers found for stack '$STACK_NAME'; skipping image cleanup"
         return 0
@@ -178,8 +182,16 @@ clean_stack_images() {
     done <<< "$image_ids"
 }
 
-if [[ "$STACK_NAME" != "github-runner" && "${KEEP_IMAGES:-}" != "1" ]]; then
-    clean_stack_images
+# Whether pre-redeploy image cleanup should run for this stack. Never clean the
+# github-runner stack (stopping it would kill the job performing this redeploy),
+# and honor the --keep-images (KEEP_IMAGES=1) escape hatch.
+should_clean_stack() {
+    [[ "$STACK_NAME" != "github-runner" && "${KEEP_IMAGES:-}" != "1" ]]
+}
+
+if should_clean_stack; then
+    # Fail open: cleanup is best-effort and must never block the redeploy below.
+    clean_stack_images || echo "Image cleanup for '$STACK_NAME' failed; continuing with redeploy"
 fi
 
 BODY=$(jq -n \

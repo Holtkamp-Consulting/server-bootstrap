@@ -3,15 +3,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# awk-extract only the pure parsing helper — redeploy-stacks.sh runs top-to-bottom
+# awk-extract only the pure helpers — redeploy-stacks.sh runs top-to-bottom
 # with no `main` guard, so sourcing the whole file would fire its API calls.
-eval "$(
-    awk '
-        /^stack_project_containers\(\) \{/ { capture = 1 }
+extract_fn() {
+    awk -v fn="$1" '
+        $0 ~ "^" fn "\\(\\) \\{" { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
     ' "$ROOT_DIR/redeploy-stacks.sh"
-)"
+}
+eval "$(extract_fn stack_project_containers)"
+eval "$(extract_fn should_clean_stack)"
 
 assert_eq() {
     local expected="$1"
@@ -24,7 +26,9 @@ assert_eq() {
     fi
 }
 
-# stack_project_containers reads STACK_NAME from the environment via ${STACK_NAME,,}.
+# stack_project_containers reads the global STACK_NAME and matches it
+# case-insensitively (lowercasing both sides inside jq via ascii_downcase), so
+# the fixtures below use mixed case on purpose.
 STACK_NAME="MyApp"
 
 containers='[
@@ -61,5 +65,20 @@ assert_eq \
     "" \
     "$(printf '%s' '[]' | stack_project_containers)" \
     'empty container array yields no rows'
+
+# ── should_clean_stack guard ──────────────────────────────────────────────────
+# The single most consequential predicate in the feature: it decides whether the
+# destructive cleanup runs. A regression here is a self-inflicted runner outage.
+assert_clean() {
+    local stack="$1" keep="$2" expected="$3" label="$4"
+    local actual
+    STACK_NAME="$stack" KEEP_IMAGES="$keep" should_clean_stack && actual="yes" || actual="no"
+    assert_eq "$expected" "$actual" "$label"
+}
+
+assert_clean "focus"         ""  "yes" 'normal stack is cleaned'
+assert_clean "github-runner" ""  "no"  'github-runner is never cleaned (cannot stop itself mid-job)'
+assert_clean "focus"         "1" "no"  'KEEP_IMAGES=1 (--keep-images) suppresses cleanup'
+assert_clean "github-runner" "1" "no"  'both guards together still skip'
 
 printf 'PASS: redeploy image cleanup\n'
