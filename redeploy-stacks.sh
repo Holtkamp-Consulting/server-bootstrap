@@ -3,17 +3,19 @@ set -euo pipefail
 
 STACK_NAME=""
 REF=""
+KEEP_IMAGES=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --stack) STACK_NAME="$2"; shift 2 ;;
         --ref)   REF="$2";        shift 2 ;;
+        --keep-images) KEEP_IMAGES=1; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
 
 if [[ -z "$STACK_NAME" ]]; then
-    echo "Usage: $0 --stack <name> [--ref <git-ref>]"
+    echo "Usage: $0 --stack <name> [--ref <git-ref>] [--keep-images]"
     exit 1
 fi
 
@@ -118,6 +120,66 @@ STACK_ID=$(curl -sfk \
 if [[ -z "$STACK_ID" || "$STACK_ID" == "null" ]]; then
     echo "Stack '$STACK_NAME' not found in Portainer — run install.sh first"
     exit 1
+fi
+
+# ── Pre-redeploy image cleanup ────────────────────────────────────────────────
+# Stop the stack, remove its containers, and delete its images so the redeploy
+# below pulls fresh images for the branch moving-tag (dev/main) instead of
+# reusing a cached digest. Best-effort: cleanup failures never block redeploy.
+
+# Reads `docker/containers/json` on stdin, prints ".Id .ImageID" for every
+# container belonging to this stack's compose project (case-insensitive match,
+# mirroring the Infisical project match above).
+stack_project_containers() {
+    jq -r --arg name "$STACK_NAME" '
+        .[]
+        | select((.Labels["com.docker.compose.project"] // "" | ascii_downcase) == ($name | ascii_downcase))
+        | "\(.Id) \(.ImageID)"'
+}
+
+clean_stack_images() {
+    echo "Stopping stack '$STACK_NAME' before image cleanup"
+    curl -sSk -o /dev/null -X POST \
+        -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+        "${PORTAINER_URL}/api/stacks/${STACK_ID}/stop?endpointId=${ENDPOINT_ID}" || true
+
+    local containers_json rows container_ids image_ids
+    containers_json=$(curl -sSk \
+        -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+        "${PORTAINER_URL}/api/endpoints/${ENDPOINT_ID}/docker/containers/json?all=1") || return 0
+
+    rows=$(printf '%s' "$containers_json" | stack_project_containers)
+    if [[ -z "$rows" ]]; then
+        echo "No containers found for stack '$STACK_NAME'; skipping image cleanup"
+        return 0
+    fi
+
+    container_ids=$(printf '%s\n' "$rows" | awk '{print $1}')
+    image_ids=$(printf '%s\n' "$rows" | awk '{print $2}' | sort -u)
+
+    # Remove containers first: Docker refuses to delete an image still
+    # referenced by a container, even a stopped one, even with force.
+    while IFS= read -r cid; do
+        [[ -z "$cid" ]] && continue
+        local cid_q; cid_q=$(jq -nr --arg v "$cid" '$v | @uri')
+        echo "Removing container ${cid}"
+        curl -sSk -o /dev/null -X DELETE \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            "${PORTAINER_URL}/api/endpoints/${ENDPOINT_ID}/docker/containers/${cid_q}?force=1" || true
+    done <<< "$container_ids"
+
+    while IFS= read -r iid; do
+        [[ -z "$iid" ]] && continue
+        local iid_q; iid_q=$(jq -nr --arg v "$iid" '$v | @uri')
+        echo "Removing image ${iid}"
+        curl -sSk -o /dev/null -X DELETE \
+            -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
+            "${PORTAINER_URL}/api/endpoints/${ENDPOINT_ID}/docker/images/${iid_q}?force=1" || true
+    done <<< "$image_ids"
+}
+
+if [[ "$STACK_NAME" != "github-runner" && "${KEEP_IMAGES:-}" != "1" ]]; then
+    clean_stack_images
 fi
 
 BODY=$(jq -n \
