@@ -3,17 +3,26 @@ set -euo pipefail
 
 STACK_NAME=""
 REF=""
+# Explicit compose IMAGE_TAG to deploy. The CI caller (redeploy.yml) passes this
+# via the $DEPLOY_IMAGE_TAG environment variable rather than a CLI flag on
+# purpose: an older copy of this script already installed on a server ignores an
+# unknown env var but aborts on an unknown flag ("Unknown argument"), so the env
+# var keeps redeploys working during the window between merging a new
+# redeploy.yml and re-running install.sh to refresh /opt/deploy/redeploy-stacks.sh.
+IMAGE_TAG_ARG="${DEPLOY_IMAGE_TAG:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --stack) STACK_NAME="$2"; shift 2 ;;
         --ref)   REF="$2";        shift 2 ;;
+        --image-tag) IMAGE_TAG_ARG="$2"; shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
 
 if [[ -z "$STACK_NAME" ]]; then
-    echo "Usage: $0 --stack <name> [--ref <git-ref>]"
+    echo "Usage: $0 --stack <name> [--ref <git-ref>] [--image-tag <tag>]"
+    echo "       (--image-tag may also be supplied via \$DEPLOY_IMAGE_TAG)"
     exit 1
 fi
 
@@ -89,15 +98,35 @@ def env_secret_value($key):
 ] | reduce .[] as $s ({}; .[$s.secretKey] = ($s.secretValue | env_secret_value($s.secretKey)))
   | to_entries | map({name: .key, value: .value})')
 
-# Default the compose IMAGE_TAG to the branch moving-tag (dev/main) that the app
-# CI publishes to GHCR. Without this, compose's ${IMAGE_TAG:-latest} resolves to
-# :latest — which is only published on main (see focus/.github/workflows/deploy.yml)
-# — so dev deploys fail with "ghcr.io/.../<svc>:latest: not found". An explicit
-# IMAGE_TAG from Infisical wins (e.g. to pin a specific SHA).
-REF_BRANCH="${REF#refs/heads/}"
-REF_BRANCH="${REF_BRANCH#refs/tags/}"
-if [[ -n "$REF_BRANCH" ]] && ! echo "$ENV_JSON" | jq -e 'any(.[]; .name == "IMAGE_TAG")' >/dev/null; then
-    ENV_JSON=$(echo "$ENV_JSON" | jq --arg tag "$REF_BRANCH" \
+# Resolve the compose IMAGE_TAG to inject when Infisical does not pin one.
+#
+# Prefer an explicit per-commit tag ($1, from --image-tag / $DEPLOY_IMAGE_TAG):
+# app CI publishes an immutable `sha-<sha>` tag (docker/metadata-action
+# type=sha,format=long) that never exists on the server, so Portainer's
+# pullImage:true reliably fetches it. A branch moving-tag (dev/main) does exist
+# locally after the first deploy, and Portainer then reuses the cached digest
+# instead of pulling the newly-built image — the stale-deploy bug this fixes.
+#
+# Fall back to the branch moving-tag ($2 is the git ref) when no per-commit tag
+# is given (e.g. a manual host run without --image-tag) so those deploys still
+# resolve a tag that exists on GHCR rather than compose's ${IMAGE_TAG:-latest}
+# default, which is only published on main.
+resolve_default_image_tag() {
+    local explicit_tag="$1" ref="$2"
+    if [[ -n "$explicit_tag" ]]; then
+        printf '%s' "$explicit_tag"
+        return 0
+    fi
+    local branch="${ref#refs/heads/}"
+    branch="${branch#refs/tags/}"
+    printf '%s' "$branch"
+}
+
+# An explicit IMAGE_TAG from Infisical wins over the resolved default (e.g. to
+# pin a specific build), so only inject when Infisical does not already set one.
+DEFAULT_IMAGE_TAG="$(resolve_default_image_tag "$IMAGE_TAG_ARG" "$REF")"
+if [[ -n "$DEFAULT_IMAGE_TAG" ]] && ! echo "$ENV_JSON" | jq -e 'any(.[]; .name == "IMAGE_TAG")' >/dev/null; then
+    ENV_JSON=$(echo "$ENV_JSON" | jq --arg tag "$DEFAULT_IMAGE_TAG" \
         '. + [{name: "IMAGE_TAG", value: $tag}]')
 fi
 
