@@ -149,10 +149,66 @@ if [[ -z "$STACK_ID" || "$STACK_ID" == "null" ]]; then
     exit 1
 fi
 
+# ── Host pre-pull ─────────────────────────────────────────────────────────────
+# Portainer's own image pull has repeatedly resolved a stale/wrong image for our
+# per-commit sha tags — it recreated the container on an old cached image while a
+# plain `docker pull` of the SAME tag fetched the correct one. So pull the images
+# ourselves with the reliable docker client (the runner has the host docker
+# socket), then tell Portainer NOT to pull (pullImage:false); it just recreates
+# onto the freshly-pulled local image. Best-effort: on any failure PULL_IMAGE_FLAG
+# stays true and Portainer pulls as before.
+PULL_IMAGE_FLAG=true
+
+prepull_stack_images() {
+    command -v docker >/dev/null 2>&1 || { echo "docker CLI unavailable; leaving image pull to Portainer"; return 1; }
+
+    local repo="${GITHUB_REPOSITORY:-Holtkamp-Consulting/${STACK_NAME}}"
+    local ref_name="${REF#refs/heads/}"; ref_name="${ref_name#refs/tags/}"; ref_name="${ref_name:-main}"
+    local ref_q; ref_q=$(jq -nr --arg v "$ref_name" '$v | @uri')
+
+    local compose
+    compose=$(curl -sSfL \
+        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github.raw" \
+        "https://api.github.com/repos/${repo}/contents/docker-compose.yml?ref=${ref_q}") \
+        || { echo "Could not fetch docker-compose.yml for pre-pull; leaving pull to Portainer"; return 1; }
+
+    # Every ghcr.io image reference (registry/owner/name, sans tag). Only these
+    # are ours to pull with GITHUB_TOKEN; other images (e.g. grafana) are left for
+    # compose to pull on demand.
+    local images
+    images=$(printf '%s\n' "$compose" | grep -oE 'ghcr\.io/[a-z0-9._/-]+' | sort -u)
+    [[ -z "$images" ]] && { echo "No ghcr.io images in compose; leaving pull to Portainer"; return 1; }
+
+    local tag
+    tag=$(printf '%s' "$ENV_JSON" | jq -r 'map(select(.name == "IMAGE_TAG")) | .[0].value // "latest"')
+
+    printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin >/dev/null 2>&1 \
+        || { echo "docker login ghcr.io failed; leaving pull to Portainer"; return 1; }
+
+    local img ok=1
+    while IFS= read -r img; do
+        [[ -z "$img" ]] && continue
+        echo "Pre-pulling ${img}:${tag}"
+        docker pull "${img}:${tag}" >/dev/null 2>&1 || { echo "  pull failed: ${img}:${tag}"; ok=0; }
+    done <<< "$images"
+
+    docker logout ghcr.io >/dev/null 2>&1 || true
+    [[ "$ok" == "1" ]]
+}
+
+# The github-runner stack can't pre-pull the image running this very script, so
+# leave its (async) self-update to Portainer's own pull.
+if [[ "$STACK_NAME" != "github-runner" ]] && prepull_stack_images; then
+    PULL_IMAGE_FLAG=false
+    echo "Images pre-pulled on host; Portainer will redeploy without pulling"
+fi
+
 BODY=$(jq -n \
     --argjson env "$ENV_JSON" \
     --arg password "$GITHUB_TOKEN" \
-    '{env: $env, pullImage: true, repositoryAuthentication: true, repositoryUsername: "token", repositoryPassword: $password}')
+    --argjson pull "$PULL_IMAGE_FLAG" \
+    '{env: $env, pullImage: $pull, repositoryAuthentication: true, repositoryUsername: "token", repositoryPassword: $password}')
 
 if [[ -n "$REF" ]]; then
     BODY=$(echo "$BODY" | jq --arg ref "$REF" '. + {repositoryReferenceName: $ref}')
@@ -181,7 +237,8 @@ update_stack_from_repository() {
     update_body=$(jq -n \
         --arg content "$compose_file" \
         --argjson env "$ENV_JSON" \
-        '{stackFileContent: $content, env: $env, pullImage: true}')
+        --argjson pull "$PULL_IMAGE_FLAG" \
+        '{stackFileContent: $content, env: $env, pullImage: $pull}')
 
     curl -sSk -X PUT \
         -o "$response_file" -w "%{http_code}" \
