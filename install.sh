@@ -816,21 +816,18 @@ log "Step 8/8 — Installing scheduled maintenance timer"
 
 sudo mkdir -p /opt/deploy /var/lib/server-bootstrap
 
+RAW_BASE="https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main"
+
 for f in maintenance-update.sh maintenance-redeploy.sh; do
-    curl -fsSL \
-        "https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/${f}" \
-        | sudo tee "/opt/deploy/${f}" > /dev/null
+    curl -fsSL "${RAW_BASE}/${f}" | sudo tee "/opt/deploy/${f}" > /dev/null
     sudo chmod +x "/opt/deploy/${f}"
 done
 
 for f in maintenance-update.service maintenance-redeploy.service; do
-    curl -fsSL \
-        "https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/systemd/${f}" \
-        | sudo tee "/etc/systemd/system/${f}" > /dev/null
+    curl -fsSL "${RAW_BASE}/systemd/${f}" | sudo tee "/etc/systemd/system/${f}" > /dev/null
 done
 
-curl -fsSL \
-    "https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/systemd/maintenance-update.timer" \
+curl -fsSL "${RAW_BASE}/systemd/maintenance-update.timer" \
     | sed "s|__MAINTENANCE_SCHEDULE__|${MAINTENANCE_SCHEDULE}|" \
     | sudo tee /etc/systemd/system/maintenance-update.timer > /dev/null
 
