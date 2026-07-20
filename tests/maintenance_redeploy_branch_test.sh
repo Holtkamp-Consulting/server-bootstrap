@@ -14,6 +14,15 @@ extract_fn() {
 }
 eval "$(extract_fn redeploy_branch_for_env)"
 
+extract_install_fn() {
+    awk -v fn="$1" '
+        $0 ~ "^" fn "\\(\\) \\{" { capture = 1 }
+        capture { print }
+        capture && /^}$/ { capture = 0 }
+    ' "$ROOT_DIR/install.sh"
+}
+eval "$(extract_install_fn deploy_branch_for_env)"
+
 assert_eq() {
     local expected="$1"
     local actual="$2"
@@ -33,5 +42,15 @@ assert_eq "dev"  "$(redeploy_branch_for_env dev)"     'dev env → dev branch'
 assert_eq "main" "$(redeploy_branch_for_env prod)"    'prod env → main branch'
 assert_eq "main" "$(redeploy_branch_for_env staging)" 'staging env → main branch'
 assert_eq "main" "$(redeploy_branch_for_env '')"      'empty env → main (safe default)'
+
+# redeploy_branch_for_env() intentionally duplicates install.sh's
+# deploy_branch_for_env() (see maintenance-redeploy.sh's rationale comment).
+# Assert the two stay behaviorally identical so a future edit to one doesn't
+# silently drift from the other — that would mean a host's weekly maintenance
+# redeploy silently pulls the wrong branch's images.
+for env in dev prod staging ""; do
+    assert_eq "$(deploy_branch_for_env "$env")" "$(redeploy_branch_for_env "$env")" \
+        "install.sh and maintenance-redeploy.sh agree for env='$env'"
+done
 
 printf 'PASS: maintenance redeploy branch resolution\n'
