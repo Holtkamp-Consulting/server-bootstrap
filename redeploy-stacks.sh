@@ -74,9 +74,48 @@ P_Q=$(jq -nr --arg v "$PROJECT_ID"    '$v | @uri')
 E_Q=$(jq -nr --arg v "$INFISICAL_ENV" '$v | @uri')
 PTH_Q=$(jq -nr --arg v "$INFISICAL_PATH" '$v | @uri')
 
-SECRETS_RESP=$(curl -sf \
+# Classifies the Infisical secrets-fetch response by HTTP status: "ok" (200,
+# proceed), "skip" (404 — this stack's project/env/path isn't provisioned in
+# Infisical yet, e.g. SecretPathNotFound; scoped to this one stack only, not
+# a system-wide problem), or "fail" (anything else — auth errors, 5xx, network
+# errors must still surface, not be swallowed like a 404).
+classify_secrets_response() {
+    local http_code="$1"
+    if [[ "$http_code" == "200" ]]; then
+        printf 'ok'
+    elif [[ "$http_code" == "404" ]]; then
+        printf 'skip'
+    else
+        printf 'fail'
+    fi
+}
+
+# curl without -f so a non-2xx response still yields its body (which carries
+# Infisical's {"statusCode":404,"error":"SecretPathNotFound",...} detail)
+# instead of curl aborting under set -e with no diagnostic.
+SECRETS_RESPONSE_FILE=$(mktemp)
+SECRETS_HTTP=$(curl -sS \
+    -o "$SECRETS_RESPONSE_FILE" \
+    -w "%{http_code}" \
     -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
     "${INFISICAL_API_BASE}/api/v4/secrets?projectId=${P_Q}&environment=${E_Q}&secretPath=${PTH_Q}&viewSecretValue=true&includeImports=true")
+SECRETS_RESP=$(cat "$SECRETS_RESPONSE_FILE")
+rm -f "$SECRETS_RESPONSE_FILE"
+
+case "$(classify_secrets_response "$SECRETS_HTTP")" in
+    skip)
+        echo "[!] No Infisical secrets available for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP}) — skipping deploy, nothing to redeploy"
+        echo "[!] Project: $STACK_NAME (${PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
+        echo "[!] $(echo "$SECRETS_RESP" | head -c 500)"
+        exit 0
+        ;;
+    fail)
+        echo "[x] Failed to fetch Infisical secrets for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP})"
+        echo "[x] Project: $STACK_NAME (${PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
+        echo "[x] $(echo "$SECRETS_RESP" | head -c 500)"
+        exit 1
+        ;;
+esac
 
 ENV_JSON=$(echo "$SECRETS_RESP" | jq '
 def normalize_private_key_value:
