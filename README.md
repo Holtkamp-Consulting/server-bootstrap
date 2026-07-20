@@ -32,6 +32,12 @@ Optional environment variables to override default ports:
 PORTAINER_PORT_HTTP=9000 PORTAINER_PORT_HTTPS=9443 bash install.sh
 ```
 
+Optional environment variable to override the weekly maintenance schedule (default: every Saturday at 00:00 — see [Scheduled maintenance](#scheduled-maintenance)):
+
+```bash
+MAINTENANCE_SCHEDULE="Sat *-*-* 00:00:00" bash install.sh
+```
+
 Credentials are stored in `/etc/infisical-deploy.env`, owned by `root:docker` with mode `640` (the `docker` group can read it so the runner container can mount it read-only — see [Setting up the GitHub Actions runner](#setting-up-the-github-actions-runner)). Re-running the installer reuses this config. The single GitHub token (with `repo` + `read:packages` scopes) is reused to create a Custom `ghcr.io` registry in Portainer (type Custom, URL `ghcr.io`) — the installer derives the registry username from the token's GitHub login — so private `ghcr.io/holtkamp-consulting/*` images are pulled automatically during stack deploys. The registry persists in the `portainer_data` volume, so later redeploys reuse it.
 
 No Infisical project ID is configured manually. The configured Infisical URL must expose the API endpoint `/api/v1/projects` for the Machine Identity token.
@@ -68,6 +74,8 @@ The redeploy pins the compose `IMAGE_TAG` to the **immutable per-commit tag** `s
 | `.github/workflows/redeploy.yml` | Reusable GitHub Actions workflow. Maintained once here; called by all stack repos. Accepts `runner_label` (`dev` or `prod`) to select the right server. |
 | `templates/stack-deploy.yml` | Copy this to `.github/workflows/deploy.yml` in each stack repo. Triggers `redeploy.yml` on push to `main` (prod) or `dev`. |
 | `templates/github-runner-compose.yml` | `docker-compose.yml` for the self-hosted GitHub Actions runner. Create a `github-runner` repository in the org, add this file as `docker-compose.yml`, and create a matching Infisical project with the secrets listed in the file. The runner is then deployed automatically by `install.sh` alongside other stacks. |
+| `maintenance-update.sh` / `maintenance-redeploy.sh` | Run on the server by systemd (see [Scheduled maintenance](#scheduled-maintenance)). `maintenance-update.sh` runs the weekly `apt` update sequence and reboots; `maintenance-redeploy.sh` stops every Portainer stack, removes all containers/images, and redeploys every stack via `redeploy-stacks.sh`, using the same immutable per-commit `IMAGE_TAG` pinning. |
+| `systemd/maintenance-update.timer`, `systemd/maintenance-update.service`, `systemd/maintenance-redeploy.service` | systemd unit files installed to `/etc/systemd/system/` by `install.sh`. The timer triggers `maintenance-update.service` weekly; `maintenance-redeploy.service` is boot-activated but self-gating (`ConditionPathExists=`) so it only runs after a maintenance-triggered reboot, never on an ordinary boot. |
 
 ### Setting up a stack repo for CD
 
@@ -85,6 +93,26 @@ The runner itself is deployed as a Portainer stack:
 The runner container reads Portainer and Infisical credentials from `/etc/infisical-deploy.env` (mounted read-only). These bootstrap credentials cannot come from Infisical itself — only runner-specific secrets live there.
 
 The runner uses `network_mode: host` so it can reach Portainer at `localhost:9000`.
+
+## Scheduled maintenance
+
+`install.sh` provisions a systemd timer that runs every Saturday at 00:00 (configurable per host via `MAINTENANCE_SCHEDULE`, see [Configuration](#configuration)) on both dev and prod. Because a self-triggered `reboot` returns immediately and cannot be followed by more work in the same systemd unit, the job is split into two chained services around the reboot:
+
+1. **`maintenance-update.service`** (triggered by `maintenance-update.timer`): `apt update && apt full-upgrade -y && apt autoremove --purge -y && apt clean`, then writes a stamp file at `/var/lib/server-bootstrap/maintenance-reboot-pending` and reboots. If any `apt` step fails, the script aborts and the box is *not* rebooted.
+2. **`maintenance-redeploy.service`** (boot-activated, gated by `ConditionPathExists=` on that stamp file — a no-op on every ordinary boot): stops every Portainer stack, removes all containers, prunes all images (`docker system prune -a -f`, data volumes are preserved), then loops `/opt/deploy/redeploy-stacks.sh --stack <name> --ref refs/heads/<branch>` over every previously-deployed stack — reusing the same immutable per-commit `IMAGE_TAG` pinning logic as ordinary CD redeploys. It removes the stamp file when done.
+
+Inspect the schedule and history:
+
+```bash
+systemctl list-timers maintenance-update.timer
+journalctl -u maintenance-update.service -u maintenance-redeploy.service
+```
+
+Trigger a run on demand (does not wait for Saturday):
+
+```bash
+sudo systemctl start maintenance-update.service
+```
 
 ## After installation
 

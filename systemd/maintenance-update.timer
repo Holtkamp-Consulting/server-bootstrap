@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly trigger for server-bootstrap OS update and reboot
+
+[Timer]
+OnCalendar=__MAINTENANCE_SCHEDULE__
+Persistent=true
+
+[Install]
+WantedBy=timers.target

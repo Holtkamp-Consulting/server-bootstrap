@@ -217,6 +217,7 @@ ensure_ghcr_registry() {
 PORTAINER_ADMIN="admin"
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
+MAINTENANCE_SCHEDULE="${MAINTENANCE_SCHEDULE:-Sat *-*-* 00:00:00}"
 DEPLOY_CONFIG="/etc/infisical-deploy.env"
 
 load_deploy_config() {
@@ -252,7 +253,7 @@ if ! command -v jq &>/dev/null; then
 fi
 
 # ── 1. Docker ─────────────────────────────────────────────────────────────────
-log "Step 1/7 — Docker"
+log "Step 1/8 — Docker"
 
 if command -v docker &>/dev/null; then
     ok "Docker already installed ($(docker --version | cut -d' ' -f3 | tr -d ','))"
@@ -269,7 +270,7 @@ if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
 fi
 
 # ── 2. Portainer ───────────────────────────────────────────────────────────────
-log "Step 2/7 — Portainer CE"
+log "Step 2/8 — Portainer CE"
 
 # Use sudo only if the current user can't write to the socket directly
 if [ -w /var/run/docker.sock ]; then
@@ -296,7 +297,7 @@ else
 fi
 
 # ── 3. Credentials ─────────────────────────────────────────────────────────────
-log "Step 3/7 — Configuring admin credentials"
+log "Step 3/8 — Configuring admin credentials"
 
 PORTAINER_API="http://localhost:${PORTAINER_PORT_HTTP}"
 MAX_WAIT=90
@@ -337,7 +338,7 @@ case "$INIT_HTTP" in
 esac
 
 # ── 4. Infisical CLI ───────────────────────────────────────────────────────────
-log "Step 4/7 — Infisical CLI"
+log "Step 4/8 — Infisical CLI"
 
 if command -v infisical &>/dev/null; then
     ok "Infisical CLI already installed ($(infisical --version 2>&1 | head -1))"
@@ -348,7 +349,7 @@ else
 fi
 
 # ── 5. Credentials ────────────────────────────────────────────────────────────
-log "Step 5/7 — Infisical + GitHub credentials"
+log "Step 5/8 — Infisical + GitHub credentials"
 
 if [ -f "$DEPLOY_CONFIG" ]; then
     warn "Deploy config already exists at $DEPLOY_CONFIG — skipping credential setup"
@@ -440,7 +441,7 @@ github_branch_head_sha() {
 }
 
 # ── 6. Stacks deployen ─────────────────────────────────────────────────────────
-log "Step 6/7 — Stack deployment from GitHub"
+log "Step 6/8 — Stack deployment from GitHub"
 
 # Portainer JWT immer frisch holen (cached token kann abgelaufen sein)
 log "Refreshing Portainer API token..."
@@ -801,7 +802,7 @@ if [ "${#SKIPPED_STACKS[@]}" -gt 0 ]; then
 fi
 
 # ── 7. Redeploy script ────────────────────────────────────────────────────────
-log "Step 7/7 — Installing redeploy-stacks.sh"
+log "Step 7/8 — Installing redeploy-stacks.sh"
 
 sudo mkdir -p /opt/deploy
 curl -fsSL \
@@ -809,6 +810,35 @@ curl -fsSL \
     | sudo tee /opt/deploy/redeploy-stacks.sh > /dev/null
 sudo chmod +x /opt/deploy/redeploy-stacks.sh
 ok "Installed /opt/deploy/redeploy-stacks.sh"
+
+# ── 8. Scheduled maintenance ──────────────────────────────────────────────────
+log "Step 8/8 — Installing scheduled maintenance timer"
+
+sudo mkdir -p /opt/deploy /var/lib/server-bootstrap
+
+for f in maintenance-update.sh maintenance-redeploy.sh; do
+    curl -fsSL \
+        "https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/${f}" \
+        | sudo tee "/opt/deploy/${f}" > /dev/null
+    sudo chmod +x "/opt/deploy/${f}"
+done
+
+for f in maintenance-update.service maintenance-redeploy.service; do
+    curl -fsSL \
+        "https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/systemd/${f}" \
+        | sudo tee "/etc/systemd/system/${f}" > /dev/null
+done
+
+curl -fsSL \
+    "https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main/systemd/maintenance-update.timer" \
+    | sed "s|__MAINTENANCE_SCHEDULE__|${MAINTENANCE_SCHEDULE}|" \
+    | sudo tee /etc/systemd/system/maintenance-update.timer > /dev/null
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now maintenance-update.timer
+sudo systemctl enable maintenance-redeploy.service
+
+ok "Installed and enabled maintenance-update.timer (schedule: ${MAINTENANCE_SCHEDULE})"
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -826,6 +856,9 @@ echo ""
 echo -e "  ${BOLD}Credentials:${NC}"
 echo -e "    Username : ${GREEN}${PORTAINER_ADMIN}${NC}"
 echo -e "    Password : ${GREEN}${PORTAINER_PASSWORD}${NC}"
+echo ""
+echo -e "  ${BOLD}Maintenance:${NC}"
+echo -e "    Schedule → ${BLUE}${MAINTENANCE_SCHEDULE}${NC} (systemctl list-timers maintenance-update.timer)"
 echo ""
 echo -e "  ${YELLOW}⚠  Save these credentials — they won't be shown again.${NC}"
 echo ""

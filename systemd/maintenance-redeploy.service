@@ -1,0 +1,14 @@
+[Unit]
+Description=server-bootstrap post-maintenance stack teardown and redeploy
+ConditionPathExists=/var/lib/server-bootstrap/maintenance-reboot-pending
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/deploy/maintenance-redeploy.sh
+
+[Install]
+WantedBy=multi-user.target
