@@ -1,0 +1,9 @@
+[Unit]
+Description=server-bootstrap weekly OS update and reboot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/deploy/maintenance-update.sh
