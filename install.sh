@@ -650,7 +650,7 @@ log "Deploying ${#DEPLOY_REPOS[@]} stack(s) authorized by the Infisical Machine 
 # such field — but Compose's default pull_policy:missing still benefits from the
 # image already being present locally when Portainer creates a new stack.
 prepull_stack_images() {
-    command -v docker >/dev/null 2>&1 || { warn "  docker CLI unavailable; leaving image pull to Portainer"; return 1; }
+    command -v docker >/dev/null 2>&1 || { warn "  [$STACK_NAME] docker CLI unavailable; leaving image pull to Portainer"; return 1; }
 
     local ref_q
     ref_q=$(jq -nr --arg v "$DEPLOY_BRANCH" '$v | @uri')
@@ -660,29 +660,29 @@ prepull_stack_images() {
         -H "Authorization: Bearer ${GITHUB_TOKEN}" \
         -H "Accept: application/vnd.github.raw" \
         "https://api.github.com/repos/${REPO}/contents/docker-compose.yml?ref=${ref_q}") \
-        || { warn "  Could not fetch docker-compose.yml for pre-pull; leaving pull to Portainer"; return 1; }
+        || { warn "  [$STACK_NAME] Could not fetch docker-compose.yml for pre-pull; leaving pull to Portainer"; return 1; }
 
     # Every ghcr.io image reference (registry/owner/name, sans tag). Only these
     # are ours to pull with GITHUB_TOKEN; other images (e.g. grafana) are left for
     # compose to pull on demand.
     local images
     images=$(printf '%s\n' "$compose" | grep -oE 'ghcr\.io/[a-z0-9._/-]+' | sort -u)
-    [[ -z "$images" ]] && { warn "  No ghcr.io images in compose; leaving pull to Portainer"; return 1; }
+    [[ -z "$images" ]] && { warn "  [$STACK_NAME] No ghcr.io images in compose; leaving pull to Portainer"; return 1; }
 
     local tag
     tag=$(printf '%s' "$ENV_JSON" | jq -r 'map(select(.name == "IMAGE_TAG")) | .[0].value // "latest"')
 
-    printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin >/dev/null 2>&1 \
-        || { warn "  docker login ghcr.io failed; leaving pull to Portainer"; return 1; }
+    printf '%s' "$GITHUB_TOKEN" | ${DOCKER} login ghcr.io -u token --password-stdin >/dev/null 2>&1 \
+        || { warn "  [$STACK_NAME] docker login ghcr.io failed; leaving pull to Portainer"; return 1; }
 
     local img ok=1
     while IFS= read -r img; do
         [[ -z "$img" ]] && continue
         log "  Pre-pulling ${img}:${tag}"
-        docker pull "${img}:${tag}" >/dev/null 2>&1 || { warn "    pull failed: ${img}:${tag}"; ok=0; }
+        ${DOCKER} pull "${img}:${tag}" >/dev/null 2>&1 || { warn "    [$STACK_NAME] pull failed: ${img}:${tag}"; ok=0; }
     done <<< "$images"
 
-    docker logout ghcr.io >/dev/null 2>&1 || true
+    ${DOCKER} logout ghcr.io >/dev/null 2>&1 || true
     [[ "$ok" == "1" ]]
 }
 
@@ -782,7 +782,7 @@ for i in "${!DEPLOY_REPOS[@]}"; do
     PULL_IMAGE_FLAG=true
     if [ "$STACK_NAME" != "github-runner" ] && prepull_stack_images; then
         PULL_IMAGE_FLAG=false
-        ok "  Images pre-pulled on host; Portainer will redeploy without pulling"
+        ok "  Images pre-pulled on host"
     fi
 
     # Prüfen ob Stack schon existiert → update vs. create
