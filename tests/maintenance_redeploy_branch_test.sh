@@ -10,18 +10,10 @@ extract_fn() {
         $0 ~ "^" fn "\\(\\) \\{" { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
-    ' "$ROOT_DIR/maintenance-redeploy.sh"
+    ' "$2"
 }
-eval "$(extract_fn redeploy_branch_for_env)"
-
-extract_install_fn() {
-    awk -v fn="$1" '
-        $0 ~ "^" fn "\\(\\) \\{" { capture = 1 }
-        capture { print }
-        capture && /^}$/ { capture = 0 }
-    ' "$ROOT_DIR/install.sh"
-}
-eval "$(extract_install_fn deploy_branch_for_env)"
+eval "$(extract_fn redeploy_branch_for_env "$ROOT_DIR/maintenance-redeploy.sh")"
+eval "$(extract_fn deploy_branch_for_env "$ROOT_DIR/install.sh")"
 
 assert_eq() {
     local expected="$1"
