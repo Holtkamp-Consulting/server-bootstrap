@@ -214,10 +214,84 @@ ensure_ghcr_registry() {
     return 1
 }
 
+# Print the ID of the user the given JWT authenticates as. The token-creation
+# endpoint is self-service only (Portainer returns 403 if the {id} in the URL is
+# not the calling user), so the ID must be resolved rather than hardcoded to 1.
+resolve_portainer_admin_id() {
+    local jwt="$1"
+    local response_file http id
+
+    response_file=$(mktemp)
+    http=$(curl -sSk \
+        -o "$response_file" \
+        -w "%{http_code}" \
+        -H "Authorization: Bearer ${jwt}" \
+        "${PORTAINER_URL}/api/users/me" 2>/dev/null || true)
+    http="${http:-000}"
+
+    if [ "$http" != "200" ]; then
+        # This function's stdout is the ID, so diagnostics must go to stderr
+        # or they are swallowed by the caller's command substitution.
+        warn "Could not resolve Portainer admin user ID (HTTP ${http})" >&2
+        warn "$(head -c 500 "$response_file")" >&2
+        rm -f "$response_file"
+        return 1
+    fi
+
+    id=$(jq -r '.Id // empty' < "$response_file" 2>/dev/null || true)
+    rm -f "$response_file"
+    printf '%s' "$id"
+}
+
+# Mint a non-expiring Portainer Access Token (used via the X-API-Key header) and
+# print its raw value. Portainer returns the raw key exactly once, at creation,
+# so the caller must persist it immediately. Requires JWT (not X-API-Key) auth:
+# Portainer explicitly rejects API-key auth on this endpoint.
+mint_portainer_access_token() {
+    local jwt="$1" admin_id="$2" description="$3"
+    local payload response_file http token
+
+    payload=$(jq -n \
+        --arg description "$description" \
+        --arg password "$PORTAINER_PASSWORD" \
+        '{description: $description, password: $password}')
+
+    response_file=$(mktemp)
+    http=$(curl -sSk -X POST \
+        -o "$response_file" \
+        -w "%{http_code}" \
+        -H "Authorization: Bearer ${jwt}" \
+        -H "Content-Type: application/json" \
+        "${PORTAINER_URL}/api/users/${admin_id}/tokens" \
+        -d "$payload" 2>/dev/null || true)
+    http="${http:-000}"
+
+    if [ "$http" != "200" ]; then
+        # This function's stdout is the token, so diagnostics must go to stderr
+        # or they are swallowed by the caller's command substitution.
+        warn "Could not create Portainer access token (HTTP ${http})" >&2
+        warn "$(head -c 500 "$response_file")" >&2
+        rm -f "$response_file"
+        return 1
+    fi
+
+    token=$(jq -r '.rawAPIKey // empty' < "$response_file" 2>/dev/null || true)
+    rm -f "$response_file"
+
+    if [ -z "$token" ]; then
+        warn "Portainer access token response contained no rawAPIKey" >&2
+        return 1
+    fi
+
+    printf '%s' "$token"
+}
+
 PORTAINER_ADMIN="admin"
 PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
+PORTAINER_PROXY_PORT="${PORTAINER_PROXY_PORT:-9444}"
 MAINTENANCE_SCHEDULE="${MAINTENANCE_SCHEDULE:-Sat *-*-* 00:00:00}"
+RAW_BASE="https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main"
 DEPLOY_CONFIG="/etc/infisical-deploy.env"
 
 load_deploy_config() {
@@ -253,7 +327,7 @@ if ! command -v jq &>/dev/null; then
 fi
 
 # ── 1. Docker ─────────────────────────────────────────────────────────────────
-log "Step 1/8 — Docker"
+log "Step 1/9 — Docker"
 
 if command -v docker &>/dev/null; then
     ok "Docker already installed ($(docker --version | cut -d' ' -f3 | tr -d ','))"
@@ -270,7 +344,7 @@ if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
 fi
 
 # ── 2. Portainer ───────────────────────────────────────────────────────────────
-log "Step 2/8 — Portainer CE"
+log "Step 2/9 — Portainer CE"
 
 # Use sudo only if the current user can't write to the socket directly
 if [ -w /var/run/docker.sock ]; then
@@ -297,7 +371,7 @@ else
 fi
 
 # ── 3. Credentials ─────────────────────────────────────────────────────────────
-log "Step 3/8 — Configuring admin credentials"
+log "Step 3/9 — Configuring admin credentials"
 
 PORTAINER_API="http://localhost:${PORTAINER_PORT_HTTP}"
 MAX_WAIT=90
@@ -338,7 +412,7 @@ case "$INIT_HTTP" in
 esac
 
 # ── 4. Infisical CLI ───────────────────────────────────────────────────────────
-log "Step 4/8 — Infisical CLI"
+log "Step 4/9 — Infisical CLI"
 
 if command -v infisical &>/dev/null; then
     ok "Infisical CLI already installed ($(infisical --version 2>&1 | head -1))"
@@ -349,7 +423,7 @@ else
 fi
 
 # ── 5. Credentials ────────────────────────────────────────────────────────────
-log "Step 5/8 — Infisical + GitHub credentials"
+log "Step 5/9 — Infisical + GitHub credentials"
 
 if [ -f "$DEPLOY_CONFIG" ]; then
     warn "Deploy config already exists at $DEPLOY_CONFIG — skipping credential setup"
@@ -441,7 +515,7 @@ github_branch_head_sha() {
 }
 
 # ── 6. Stacks deployen ─────────────────────────────────────────────────────────
-log "Step 6/8 — Stack deployment from GitHub"
+log "Step 6/9 — Stack deployment from GitHub"
 
 # Portainer JWT immer frisch holen (cached token kann abgelaufen sein)
 log "Refreshing Portainer API token..."
@@ -801,8 +875,102 @@ if [ "${#SKIPPED_STACKS[@]}" -gt 0 ]; then
     warn "Skipped ${#SKIPPED_STACKS[@]} stack(s) without Infisical secrets: ${SKIPPED_STACKS[*]}"
 fi
 
-# ── 7. Redeploy script ────────────────────────────────────────────────────────
-log "Step 7/8 — Installing redeploy-stacks.sh"
+# ── 7. Portainer read-only API proxy ──────────────────────────────────────────
+# Deliberately its own top-level step, not nested in Step 2: a run against an
+# already-bootstrapped host hits Step 2's "already running — skipping" branch,
+# and the proxy must still be added retroactively there.
+#
+# Extracted into a function (rather than left as inline Step 7 body) so its
+# three branches — idempotency skip, stale-token reuse, fresh mint — can be
+# unit-tested with stubbed docker/curl/sudo, per tests/install_portainer_proxy_step_test.sh.
+deploy_portainer_proxy() {
+    local jwt="$1"
+
+    if ${DOCKER} ps --format '{{.Names}}' 2>/dev/null | grep -q '^portainer-proxy$'; then
+        ok "Portainer proxy already running — skipping"
+        return 0
+    fi
+
+    # A token reused from a prior run may have been revoked (e.g. an operator
+    # completed only step 1 of the documented manual rotation flow). Validate
+    # it with a lightweight authenticated call before wiring it into the
+    # container; fall through to minting a fresh one on failure.
+    if [ -n "${PORTAINER_ACCESS_TOKEN:-}" ] \
+        && ! curl -sfk -H "X-Api-Key: ${PORTAINER_ACCESS_TOKEN}" "${PORTAINER_URL}/api/endpoints" &>/dev/null; then
+        warn "Existing Portainer access token is no longer valid — minting a new one"
+        PORTAINER_ACCESS_TOKEN=""
+    fi
+
+    if [ -z "${PORTAINER_ACCESS_TOKEN:-}" ]; then
+        log "Creating Portainer access token for the read-only proxy..."
+        # mint_portainer_access_token needs JWT (it rejects X-API-Key auth);
+        # $jwt is the admin JWT Step 6 just refreshed, still fresh here.
+        local PROXY_ADMIN_ID
+        PROXY_ADMIN_ID=$(resolve_portainer_admin_id "$jwt")
+        if [ -z "$PROXY_ADMIN_ID" ]; then
+            err "Could not resolve the Portainer admin user ID"
+            exit 1
+        fi
+
+        if ! PORTAINER_ACCESS_TOKEN=$(mint_portainer_access_token "$jwt" "$PROXY_ADMIN_ID" "server-topologie-proxy"); then
+            err "Failed to create Portainer access token"
+            exit 1
+        fi
+
+        # Portainer returns the raw key only once, so it must be persisted
+        # before anything else can fail. Any stale line from a prior mint
+        # (e.g. after the reuse-validation fallback above) is dropped first
+        # so re-runs don't accumulate duplicate PORTAINER_ACCESS_TOKEN lines.
+        if [ -f "$DEPLOY_CONFIG" ]; then
+            sudo awk '!/^PORTAINER_ACCESS_TOKEN=/' "$DEPLOY_CONFIG" \
+                | sudo tee "${DEPLOY_CONFIG}.tmp" > /dev/null
+            sudo mv "${DEPLOY_CONFIG}.tmp" "$DEPLOY_CONFIG"
+        fi
+        printf 'PORTAINER_ACCESS_TOKEN=%s\n' "$(quote_env_value "$PORTAINER_ACCESS_TOKEN")" \
+            | sudo tee -a "$DEPLOY_CONFIG" > /dev/null
+        sudo chown root:docker "$DEPLOY_CONFIG"
+        sudo chmod 640 "$DEPLOY_CONFIG"
+        ok "Portainer access token created and saved to $DEPLOY_CONFIG"
+    else
+        ok "Reusing existing Portainer access token from $DEPLOY_CONFIG"
+    fi
+
+    log "Installing Portainer proxy config..."
+    sudo mkdir -p /opt/deploy/portainer-proxy
+    curl -fsSL "${RAW_BASE}/caddy/portainer-proxy.Caddyfile" \
+        | sed \
+            -e "s|__PROXY_PORT__|${PORTAINER_PROXY_PORT}|g" \
+            -e "s|__PORTAINER_UPSTREAM__|localhost:${PORTAINER_PORT_HTTP}|g" \
+        | sudo tee /opt/deploy/portainer-proxy/Caddyfile > /dev/null
+
+    ${DOCKER} rm -f portainer-proxy >/dev/null 2>&1 || true
+    ${DOCKER} run -d \
+        --name portainer-proxy \
+        --restart=always \
+        --network host \
+        -e "PORTAINER_ACCESS_TOKEN=${PORTAINER_ACCESS_TOKEN}" \
+        -v /opt/deploy/portainer-proxy/Caddyfile:/etc/caddy/Caddyfile:ro \
+        caddy:2-alpine >/dev/null
+
+    log "Waiting for the Portainer proxy to become ready..."
+    local proxy_max_wait=30 proxy_elapsed=0
+    until curl -sf "http://localhost:${PORTAINER_PROXY_PORT}/api/status" &>/dev/null; do
+        if [ "$proxy_elapsed" -ge "$proxy_max_wait" ]; then
+            err "Portainer proxy did not become ready within ${proxy_max_wait}s"
+            err "Check logs: sudo docker logs portainer-proxy"
+            exit 1
+        fi
+        sleep 1
+        proxy_elapsed=$((proxy_elapsed + 1))
+    done
+    ok "Portainer read-only proxy started on port ${PORTAINER_PROXY_PORT}"
+}
+
+log "Step 7/9 — Portainer read-only API proxy"
+deploy_portainer_proxy "$PORTAINER_TOKEN"
+
+# ── 8. Redeploy script ────────────────────────────────────────────────────────
+log "Step 8/9 — Installing redeploy-stacks.sh"
 
 sudo mkdir -p /opt/deploy
 curl -fsSL \
@@ -811,12 +979,11 @@ curl -fsSL \
 sudo chmod +x /opt/deploy/redeploy-stacks.sh
 ok "Installed /opt/deploy/redeploy-stacks.sh"
 
-# ── 8. Scheduled maintenance ──────────────────────────────────────────────────
-log "Step 8/8 — Installing scheduled maintenance timer"
+# ── 9. Scheduled maintenance ──────────────────────────────────────────────────
+log "Step 9/9 — Installing scheduled maintenance timer"
 
 sudo mkdir -p /opt/deploy /var/lib/server-bootstrap
 
-RAW_BASE="https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main"
 
 for f in maintenance-update.sh maintenance-redeploy.sh; do
     curl -fsSL "${RAW_BASE}/${f}" | sudo tee "/opt/deploy/${f}" > /dev/null
@@ -849,6 +1016,9 @@ echo ""
 echo -e "  ${BOLD}Portainer:${NC}"
 echo -e "    HTTP  → ${BLUE}http://${LOCAL_IP}:${PORTAINER_PORT_HTTP}${NC}"
 echo -e "    HTTPS → ${BLUE}https://${LOCAL_IP}:${PORTAINER_PORT_HTTPS}${NC}"
+echo ""
+echo -e "  ${BOLD}Portainer read-only proxy:${NC}"
+echo -e "    URL   → ${BLUE}http://${LOCAL_IP}:${PORTAINER_PROXY_PORT}${NC} (GET allowlist, no credential required)"
 echo ""
 echo -e "  ${BOLD}Credentials:${NC}"
 echo -e "    Username : ${GREEN}${PORTAINER_ADMIN}${NC}"
