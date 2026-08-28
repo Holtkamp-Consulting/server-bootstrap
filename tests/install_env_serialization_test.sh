@@ -226,7 +226,8 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 
 if [[ "$*" == *"/api/users/me"* ]]; then
-    printf '{"Id": 7, "Username": "admin"}'
+    [ -n "$output_file" ] && printf '{"Id": 7, "Username": "admin"}' > "$output_file"
+    printf '200'
     exit 0
 fi
 
@@ -256,6 +257,58 @@ assert_eq \
     "ptr_test_raw_key" \
     "$minted_token" \
     'rawAPIKey is extracted from the token creation response'
+
+# A non-200 /api/users/me response (expired JWT, network hiccup) must be a
+# hard failure, not a silently empty-then-truthy ID.
+cat > "$tmp_bin/curl" <<'EOF'
+#!/bin/bash
+output_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        -o) output_file="${args[$((i + 1))]}" ;;
+    esac
+done
+[ -n "$output_file" ] && printf '{"message": "unauthorized"}' > "$output_file"
+printf '401'
+EOF
+chmod +x "$tmp_bin/curl"
+
+resolve_admin_failure_rc=0
+PATH="$tmp_bin:$PATH" \
+PORTAINER_URL="https://portainer.test" \
+    resolve_portainer_admin_id "fake-jwt" >/dev/null \
+    || resolve_admin_failure_rc=$?
+assert_eq \
+    "1" \
+    "$resolve_admin_failure_rc" \
+    'non-200 /api/users/me response is treated as a failure, not an empty success'
+
+# A 200 whose body carries no .Id must resolve to empty, matching the
+# caller's [ -z ] gate — not a stray truthy value.
+cat > "$tmp_bin/curl" <<'EOF'
+#!/bin/bash
+output_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        -o) output_file="${args[$((i + 1))]}" ;;
+    esac
+done
+[ -n "$output_file" ] && printf '{"Username": "admin"}' > "$output_file"
+printf '200'
+EOF
+chmod +x "$tmp_bin/curl"
+
+resolved_missing_id=$(
+    PATH="$tmp_bin:$PATH" \
+    PORTAINER_URL="https://portainer.test" \
+    resolve_portainer_admin_id "fake-jwt"
+)
+assert_eq \
+    "" \
+    "$resolved_missing_id" \
+    '/api/users/me response without an Id resolves to empty'
 
 # Non-200 (e.g. wrong password → 403) must be a hard failure, not an empty token.
 cat > "$tmp_bin/curl" <<'EOF'
@@ -308,5 +361,35 @@ assert_eq \
     "1" \
     "$missing_key_rc" \
     'token creation response without rawAPIKey is treated as a failure'
+
+# The outgoing -d payload must stay valid JSON for passwords containing
+# characters that would break naive string interpolation ("`$).
+cat > "$tmp_bin/curl" <<EOF
+#!/bin/bash
+output_file=""
+payload=""
+args=("\$@")
+for ((i = 0; i < \${#args[@]}; i++)); do
+    case "\${args[\$i]}" in
+        -o) output_file="\${args[\$((i + 1))]}" ;;
+        -d) payload="\${args[\$((i + 1))]}" ;;
+    esac
+done
+printf '%s' "\$payload" > "$tmp_bin/last_payload.json"
+[ -n "\$output_file" ] && printf '{"rawAPIKey": "ptr_test_raw_key", "apiKey": {"id": 1, "userId": 7}}' > "\$output_file"
+printf '200'
+EOF
+chmod +x "$tmp_bin/curl"
+
+PATH="$tmp_bin:$PATH" \
+PORTAINER_URL="https://portainer.test" \
+PORTAINER_PASSWORD='p@ss"word'\''s $pecial `chars`' \
+    mint_portainer_access_token "fake-jwt" "7" "server-topologie-proxy" >/dev/null
+
+payload_password=$(jq -r '.password' < "$tmp_bin/last_payload.json")
+assert_eq \
+    'p@ss"word'\''s $pecial `chars`' \
+    "$payload_password" \
+    'password with quotes, $ and backticks survives jq -n --arg payload construction intact'
 
 printf 'PASS: install env serialization\n'

@@ -219,11 +219,28 @@ ensure_ghcr_registry() {
 # not the calling user), so the ID must be resolved rather than hardcoded to 1.
 resolve_portainer_admin_id() {
     local jwt="$1"
+    local response_file http id
 
-    curl -sfk \
+    response_file=$(mktemp)
+    http=$(curl -sSk \
+        -o "$response_file" \
+        -w "%{http_code}" \
         -H "Authorization: Bearer ${jwt}" \
-        "${PORTAINER_URL}/api/users/me" 2>/dev/null \
-        | jq -r '.Id // empty' 2>/dev/null || true
+        "${PORTAINER_URL}/api/users/me" 2>/dev/null || true)
+    http="${http:-000}"
+
+    if [ "$http" != "200" ]; then
+        # This function's stdout is the ID, so diagnostics must go to stderr
+        # or they are swallowed by the caller's command substitution.
+        warn "Could not resolve Portainer admin user ID (HTTP ${http})" >&2
+        warn "$(head -c 500 "$response_file")" >&2
+        rm -f "$response_file"
+        return 1
+    fi
+
+    id=$(jq -r '.Id // empty' < "$response_file" 2>/dev/null || true)
+    rm -f "$response_file"
+    printf '%s' "$id"
 }
 
 # Mint a non-expiring Portainer Access Token (used via the X-API-Key header) and
@@ -862,42 +879,52 @@ fi
 # Deliberately its own top-level step, not nested in Step 2: a run against an
 # already-bootstrapped host hits Step 2's "already running — skipping" branch,
 # and the proxy must still be added retroactively there.
-log "Step 7/9 — Portainer read-only API proxy"
+#
+# Extracted into a function (rather than left as inline Step 7 body) so its
+# three branches — idempotency skip, stale-token reuse, fresh mint — can be
+# unit-tested with stubbed docker/curl/sudo, per tests/install_portainer_proxy_step_test.sh.
+deploy_portainer_proxy() {
+    local jwt="$1"
 
-if ${DOCKER} ps --format '{{.Names}}' 2>/dev/null | grep -q '^portainer-proxy$'; then
-    ok "Portainer proxy already running — skipping"
-else
+    if ${DOCKER} ps --format '{{.Names}}' 2>/dev/null | grep -q '^portainer-proxy$'; then
+        ok "Portainer proxy already running — skipping"
+        return 0
+    fi
+
+    # A token reused from a prior run may have been revoked (e.g. an operator
+    # completed only step 1 of the documented manual rotation flow). Validate
+    # it with a lightweight authenticated call before wiring it into the
+    # container; fall through to minting a fresh one on failure.
+    if [ -n "${PORTAINER_ACCESS_TOKEN:-}" ] \
+        && ! curl -sfk -H "X-Api-Key: ${PORTAINER_ACCESS_TOKEN}" "${PORTAINER_URL}/api/endpoints" &>/dev/null; then
+        warn "Existing Portainer access token is no longer valid — minting a new one"
+        PORTAINER_ACCESS_TOKEN=""
+    fi
+
     if [ -z "${PORTAINER_ACCESS_TOKEN:-}" ]; then
         log "Creating Portainer access token for the read-only proxy..."
-        # The token endpoint needs a JWT (it rejects X-API-Key auth), so fetch a
-        # fresh one rather than reusing PORTAINER_TOKEN, which may have expired.
-        PROXY_AUTH_PAYLOAD=$(jq -n \
-            --arg username "$PORTAINER_ADMIN" \
-            --arg password "$PORTAINER_PASSWORD" \
-            '{username: $username, password: $password}')
-        PROXY_JWT=$(curl -sfk -X POST \
-            -H "Content-Type: application/json" \
-            -d "$PROXY_AUTH_PAYLOAD" \
-            "${PORTAINER_URL}/api/auth" 2>/dev/null | jq -r '.jwt // empty' || true)
-
-        if [ -z "$PROXY_JWT" ]; then
-            err "Could not authenticate with Portainer to create the proxy access token"
-            exit 1
-        fi
-
-        PROXY_ADMIN_ID=$(resolve_portainer_admin_id "$PROXY_JWT")
+        # mint_portainer_access_token needs JWT (it rejects X-API-Key auth);
+        # $jwt is the admin JWT Step 6 just refreshed, still fresh here.
+        PROXY_ADMIN_ID=$(resolve_portainer_admin_id "$jwt")
         if [ -z "$PROXY_ADMIN_ID" ]; then
             err "Could not resolve the Portainer admin user ID"
             exit 1
         fi
 
-        if ! PORTAINER_ACCESS_TOKEN=$(mint_portainer_access_token "$PROXY_JWT" "$PROXY_ADMIN_ID" "server-topologie-proxy"); then
+        if ! PORTAINER_ACCESS_TOKEN=$(mint_portainer_access_token "$jwt" "$PROXY_ADMIN_ID" "server-topologie-proxy"); then
             err "Failed to create Portainer access token"
             exit 1
         fi
 
-        # Appended, not rewritten: Portainer returns the raw key only once, so it
-        # must be persisted before anything else can fail.
+        # Portainer returns the raw key only once, so it must be persisted
+        # before anything else can fail. Any stale line from a prior mint
+        # (e.g. after the reuse-validation fallback above) is dropped first
+        # so re-runs don't accumulate duplicate PORTAINER_ACCESS_TOKEN lines.
+        if [ -f "$DEPLOY_CONFIG" ]; then
+            sudo awk '!/^PORTAINER_ACCESS_TOKEN=/' "$DEPLOY_CONFIG" \
+                | sudo tee "${DEPLOY_CONFIG}.tmp" > /dev/null
+            sudo mv "${DEPLOY_CONFIG}.tmp" "$DEPLOY_CONFIG"
+        fi
         printf 'PORTAINER_ACCESS_TOKEN=%s\n' "$(quote_env_value "$PORTAINER_ACCESS_TOKEN")" \
             | sudo tee -a "$DEPLOY_CONFIG" > /dev/null
         sudo chown root:docker "$DEPLOY_CONFIG"
@@ -923,8 +950,23 @@ else
         -e "PORTAINER_ACCESS_TOKEN=${PORTAINER_ACCESS_TOKEN}" \
         -v /opt/deploy/portainer-proxy/Caddyfile:/etc/caddy/Caddyfile:ro \
         caddy:2-alpine >/dev/null
+
+    log "Waiting for the Portainer proxy to become ready..."
+    local proxy_max_wait=30 proxy_elapsed=0
+    until curl -sf "http://localhost:${PORTAINER_PROXY_PORT}/api/status" &>/dev/null; do
+        if [ "$proxy_elapsed" -ge "$proxy_max_wait" ]; then
+            err "Portainer proxy did not become ready within ${proxy_max_wait}s"
+            err "Check logs: sudo docker logs portainer-proxy"
+            exit 1
+        fi
+        sleep 1
+        proxy_elapsed=$((proxy_elapsed + 1))
+    done
     ok "Portainer read-only proxy started on port ${PORTAINER_PROXY_PORT}"
-fi
+}
+
+log "Step 7/9 — Portainer read-only API proxy"
+deploy_portainer_proxy "$PORTAINER_TOKEN"
 
 # ── 8. Redeploy script ────────────────────────────────────────────────────────
 log "Step 8/9 — Installing redeploy-stacks.sh"

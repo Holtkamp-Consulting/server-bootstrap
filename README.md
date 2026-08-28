@@ -161,3 +161,4 @@ Log in with the credentials shown at the end of the installation output.
 - The generated password is only shown once — save it immediately.
 - The current user is added to the `docker` group. A re-login may be required for the change to take effect.
 - To view Portainer logs: `docker logs portainer`
+- To view the read-only proxy's logs: `docker logs portainer-proxy`
