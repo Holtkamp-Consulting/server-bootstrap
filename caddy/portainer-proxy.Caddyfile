@@ -1,0 +1,61 @@
+# Read-only reverse proxy in front of the local Portainer API.
+#
+# Deployed by install.sh (Step 7/9). Allows GET-only access to a small
+# allowlist of Portainer API routes and injects the Portainer credential
+# host-side via the PORTAINER_ACCESS_TOKEN environment variable — callers
+# authenticate only against this proxy and never see the underlying
+# Portainer token. See README.md for the full route allowlist and the
+# distinction from PORTAINER_TOKEN.
+#
+# __PROXY_PORT__ / __PORTAINER_UPSTREAM__ are substituted via sed before this
+# file is mounted into the caddy:2-alpine container.
+
+:__PROXY_PORT__ {
+	@allowed_status {
+		method GET
+		path /api/status
+	}
+	@allowed_endpoints {
+		method GET
+		path /api/endpoints
+	}
+	# path_regexp, not a plain `*` wildcard: Caddy's own docs are inconsistent
+	# about multi-segment wildcard matching, and this allowlist is
+	# security-critical. Anchored + digit-only rejects both non-numeric ids and
+	# trailing path segments.
+	@allowed_containers {
+		method GET
+		path_regexp ^/api/endpoints/\d+/docker/containers/json$
+	}
+	@allowed_networks {
+		method GET
+		path_regexp ^/api/endpoints/\d+/docker/networks$
+	}
+
+	handle @allowed_status {
+		reverse_proxy http://__PORTAINER_UPSTREAM__ {
+			header_up X-Api-Key {env.PORTAINER_ACCESS_TOKEN}
+		}
+	}
+	handle @allowed_endpoints {
+		reverse_proxy http://__PORTAINER_UPSTREAM__ {
+			header_up X-Api-Key {env.PORTAINER_ACCESS_TOKEN}
+		}
+	}
+	handle @allowed_containers {
+		reverse_proxy http://__PORTAINER_UPSTREAM__ {
+			header_up X-Api-Key {env.PORTAINER_ACCESS_TOKEN}
+		}
+	}
+	handle @allowed_networks {
+		reverse_proxy http://__PORTAINER_UPSTREAM__ {
+			header_up X-Api-Key {env.PORTAINER_ACCESS_TOKEN}
+		}
+	}
+
+	# Default-deny: anything not explicitly allowlisted above, including any
+	# non-GET method on an otherwise allowed route.
+	handle {
+		respond 403
+	}
+}

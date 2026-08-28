@@ -11,6 +11,8 @@ eval "$(
         /^create_local_portainer_endpoint\(\) \{/ { capture = 1 }
         /^extract_portainer_registry_id\(\) \{/ { capture = 1 }
         /^ensure_ghcr_registry\(\) \{/ { capture = 1 }
+        /^resolve_portainer_admin_id\(\) \{/ { capture = 1 }
+        /^mint_portainer_access_token\(\) \{/ { capture = 1 }
         capture { print }
         capture && /^}$/ { capture = 0 }
     ' "$ROOT_DIR/install.sh"
@@ -210,5 +212,101 @@ assert_eq \
     "0" \
     "$registry_created_http" \
     'ensure_ghcr_registry succeeds on HTTP 201 create path'
+
+# ── Portainer access token minting (mocked curl) ─────────────────────────────
+
+cat > "$tmp_bin/curl" <<'EOF'
+#!/bin/bash
+output_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        -o) output_file="${args[$((i + 1))]}" ;;
+    esac
+done
+
+if [[ "$*" == *"/api/users/me"* ]]; then
+    printf '{"Id": 7, "Username": "admin"}'
+    exit 0
+fi
+
+# POST /api/users/{id}/tokens → Portainer answers 200 (not 201) with the raw key
+[ -n "$output_file" ] && printf '{"rawAPIKey": "ptr_test_raw_key", "apiKey": {"id": 1, "userId": 7, "description": "server-topologie-proxy"}}' > "$output_file"
+printf '200'
+EOF
+chmod +x "$tmp_bin/curl"
+
+resolved_admin_id=$(
+    PATH="$tmp_bin:$PATH" \
+    PORTAINER_URL="https://portainer.test" \
+    resolve_portainer_admin_id "fake-jwt"
+)
+assert_eq \
+    "7" \
+    "$resolved_admin_id" \
+    'admin user ID is resolved from /api/users/me rather than hardcoded'
+
+minted_token=$(
+    PATH="$tmp_bin:$PATH" \
+    PORTAINER_URL="https://portainer.test" \
+    PORTAINER_PASSWORD="admin-pw" \
+    mint_portainer_access_token "fake-jwt" "7" "server-topologie-proxy"
+)
+assert_eq \
+    "ptr_test_raw_key" \
+    "$minted_token" \
+    'rawAPIKey is extracted from the token creation response'
+
+# Non-200 (e.g. wrong password → 403) must be a hard failure, not an empty token.
+cat > "$tmp_bin/curl" <<'EOF'
+#!/bin/bash
+output_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        -o) output_file="${args[$((i + 1))]}" ;;
+    esac
+done
+[ -n "$output_file" ] && printf '{"message": "invalid password"}' > "$output_file"
+printf '403'
+EOF
+chmod +x "$tmp_bin/curl"
+
+mint_failure_rc=0
+PATH="$tmp_bin:$PATH" \
+PORTAINER_URL="https://portainer.test" \
+PORTAINER_PASSWORD="wrong-pw" \
+    mint_portainer_access_token "fake-jwt" "7" "server-topologie-proxy" >/dev/null \
+    || mint_failure_rc=$?
+assert_eq \
+    "1" \
+    "$mint_failure_rc" \
+    'non-200 token creation response is treated as a failure'
+
+# A 200 whose body carries no rawAPIKey must fail too, rather than returning "".
+cat > "$tmp_bin/curl" <<'EOF'
+#!/bin/bash
+output_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        -o) output_file="${args[$((i + 1))]}" ;;
+    esac
+done
+[ -n "$output_file" ] && printf '{"apiKey": {"id": 1}}' > "$output_file"
+printf '200'
+EOF
+chmod +x "$tmp_bin/curl"
+
+missing_key_rc=0
+PATH="$tmp_bin:$PATH" \
+PORTAINER_URL="https://portainer.test" \
+PORTAINER_PASSWORD="admin-pw" \
+    mint_portainer_access_token "fake-jwt" "7" "server-topologie-proxy" >/dev/null \
+    || missing_key_rc=$?
+assert_eq \
+    "1" \
+    "$missing_key_rc" \
+    'token creation response without rawAPIKey is treated as a failure'
 
 printf 'PASS: install env serialization\n'

@@ -16,6 +16,7 @@ During the first installation you will be prompted for Infisical Machine Identit
 |--------------|---------|-----------------------------|
 | Docker CE    | latest  | —                           |
 | Portainer CE | latest  | 9000 (HTTP), 9443 (HTTPS)   |
+| Portainer read-only proxy | caddy:2-alpine | 9444 (HTTP, GET allowlist) |
 | Infisical CLI | latest | —                           |
 
 ## Requirements
@@ -29,7 +30,7 @@ During the first installation you will be prompted for Infisical Machine Identit
 Optional environment variables to override default ports:
 
 ```bash
-PORTAINER_PORT_HTTP=9000 PORTAINER_PORT_HTTPS=9443 bash install.sh
+PORTAINER_PORT_HTTP=9000 PORTAINER_PORT_HTTPS=9443 PORTAINER_PROXY_PORT=9444 bash install.sh
 ```
 
 Optional environment variable to override the weekly maintenance schedule (default: every Saturday at 00:00 — see [Scheduled maintenance](#scheduled-maintenance)):
@@ -53,6 +54,37 @@ For each matching project/repository pair:
 - the GitHub repository is deployed using `docker-compose.yml` from the `main` branch
 
 Projects without a matching GitHub repository are skipped. Repositories without a matching Infisical project are not deployed.
+
+## Read-only Portainer API proxy
+
+`install.sh` deploys a small reverse proxy (`caddy:2-alpine`, port `9444`, `--restart=always`) in front of the host-local Portainer API, so external consumers — such as the [Server-Topologie](https://github.com/Holtkamp-Consulting/Server-Topologie) backend — can read container and network inventory without ever holding a Portainer credential.
+
+The proxy allows `GET` on exactly these routes:
+
+- `/api/status`
+- `/api/endpoints`
+- `/api/endpoints/{id}/docker/containers/json`
+- `/api/endpoints/{id}/docker/networks`
+
+Everything else returns `403`: any other route, and any non-`GET` method **including on an allowed route**. `{id}` must be numeric. It is an allowlist, not a blocklist — a new Portainer route is denied by default rather than accidentally exposed.
+
+The proxy holds the Portainer credential and injects the `X-API-Key` header host-side. Callers authenticate only against the proxy and never see the token; it appears in no proxy response. Since the token is admin-equivalent (see below), that injection is the primary protection and the allowlist is the second layer — both are covered by `tests/portainer_proxy_allowlist_test.sh`.
+
+The proxy listens on all interfaces at `http://<host-ip>:9444`, not on loopback, because its consumer is a remote backend. It is not TLS-terminated and carries no credential of its own — keep it on a trusted LAN.
+
+### `PORTAINER_ACCESS_TOKEN` vs `PORTAINER_TOKEN`
+
+Both live in `/etc/infisical-deploy.env` (`root:docker`, mode `640`) and are **not** interchangeable:
+
+| Variable | What it is | Lifetime | Used by |
+|----------|------------|----------|---------|
+| `PORTAINER_TOKEN` | Session JWT from `POST /api/auth` | Expires; re-fetched on every run | `install.sh` and `redeploy-stacks.sh`, for stack deploys |
+| `PORTAINER_ACCESS_TOKEN` | Portainer Access Token from `POST /api/users/{id}/tokens`, sent as `X-API-Key` | Non-expiring | The proxy container only |
+
+A session JWT is unusable for a long-running proxy, which is why `install.sh` mints a separate Access Token — attached to the existing `admin` user, with the description `server-topologie-proxy` (visible in Portainer under *My account → Access tokens*). Portainer CE has no read-only role, so this token is admin-equivalent; it never leaves the host. Portainer returns its raw value only once, at creation, so `install.sh` persists it immediately and reuses the stored value on later runs instead of minting duplicates.
+
+The step is idempotent and independent of the Portainer step: re-running `install.sh` on a host that already has the proxy is a no-op, and a host bootstrapped before this feature gets the proxy retrofitted without disturbing its existing Portainer setup. To rotate the token, revoke it in the Portainer UI, remove the `PORTAINER_ACCESS_TOKEN` line from `/etc/infisical-deploy.env`, `docker rm -f portainer-proxy`, and re-run `install.sh`.
+
 
 ## Continuous deployment
 
