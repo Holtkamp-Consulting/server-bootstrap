@@ -905,6 +905,7 @@ deploy_portainer_proxy() {
         log "Creating Portainer access token for the read-only proxy..."
         # mint_portainer_access_token needs JWT (it rejects X-API-Key auth);
         # $jwt is the admin JWT Step 6 just refreshed, still fresh here.
+        local PROXY_ADMIN_ID
         PROXY_ADMIN_ID=$(resolve_portainer_admin_id "$jwt")
         if [ -z "$PROXY_ADMIN_ID" ]; then
             err "Could not resolve the Portainer admin user ID"

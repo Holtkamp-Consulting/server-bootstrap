@@ -10,6 +10,12 @@
 # __PROXY_PORT__ / __PORTAINER_UPSTREAM__ are substituted via sed before this
 # file is mounted into the caddy:2-alpine container.
 
+(portainer_upstream) {
+	reverse_proxy http://__PORTAINER_UPSTREAM__ {
+		header_up X-Api-Key {env.PORTAINER_ACCESS_TOKEN}
+	}
+}
+
 :__PROXY_PORT__ {
 	@allowed_status {
 		method GET
@@ -33,24 +39,16 @@
 	}
 
 	handle @allowed_status {
-		reverse_proxy http://__PORTAINER_UPSTREAM__ {
-			header_up X-Api-Key {env.PORTAINER_ACCESS_TOKEN}
-		}
+		import portainer_upstream
 	}
 	handle @allowed_endpoints {
-		reverse_proxy http://__PORTAINER_UPSTREAM__ {
-			header_up X-Api-Key {env.PORTAINER_ACCESS_TOKEN}
-		}
+		import portainer_upstream
 	}
 	handle @allowed_containers {
-		reverse_proxy http://__PORTAINER_UPSTREAM__ {
-			header_up X-Api-Key {env.PORTAINER_ACCESS_TOKEN}
-		}
+		import portainer_upstream
 	}
 	handle @allowed_networks {
-		reverse_proxy http://__PORTAINER_UPSTREAM__ {
-			header_up X-Api-Key {env.PORTAINER_ACCESS_TOKEN}
-		}
+		import portainer_upstream
 	}
 
 	# Default-deny: anything not explicitly allowlisted above, including any
