@@ -712,6 +712,54 @@ fi
 echo ""
 log "Deploying ${#DEPLOY_REPOS[@]} stack(s) authorized by the Infisical Machine Identity"
 
+# ── Host pre-pull ─────────────────────────────────────────────────────────────
+# Portainer's own image pull has repeatedly resolved a stale/wrong image for our
+# per-commit sha tags — it recreated the container on an old cached image while a
+# plain `docker pull` of the SAME tag fetched the correct one. So pull the images
+# ourselves with the reliable docker client (the host has the docker socket),
+# then tell Portainer NOT to pull (pullImage:false); it just recreates onto the
+# freshly-pulled local image. Best-effort: on any failure PULL_IMAGE_FLAG stays
+# true and Portainer pulls as before. Only the stack-update Portainer request
+# accepts a pullImage flag — the stack-create-from-repository endpoint has no
+# such field — but Compose's default pull_policy:missing still benefits from the
+# image already being present locally when Portainer creates a new stack.
+prepull_stack_images() {
+    command -v docker >/dev/null 2>&1 || { warn "  [$STACK_NAME] docker CLI unavailable; leaving image pull to Portainer"; return 1; }
+
+    local ref_q
+    ref_q=$(jq -nr --arg v "$DEPLOY_BRANCH" '$v | @uri')
+
+    local compose
+    compose=$(curl -sSfL \
+        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github.raw" \
+        "https://api.github.com/repos/${REPO}/contents/docker-compose.yml?ref=${ref_q}") \
+        || { warn "  [$STACK_NAME] Could not fetch docker-compose.yml for pre-pull; leaving pull to Portainer"; return 1; }
+
+    # Every ghcr.io image reference (registry/owner/name, sans tag). Only these
+    # are ours to pull with GITHUB_TOKEN; other images (e.g. grafana) are left for
+    # compose to pull on demand.
+    local images
+    images=$(printf '%s\n' "$compose" | grep -oE 'ghcr\.io/[a-z0-9._/-]+' | sort -u)
+    [[ -z "$images" ]] && { warn "  [$STACK_NAME] No ghcr.io images in compose; leaving pull to Portainer"; return 1; }
+
+    local tag
+    tag=$(printf '%s' "$ENV_JSON" | jq -r 'map(select(.name == "IMAGE_TAG")) | .[0].value // "latest"')
+
+    printf '%s' "$GITHUB_TOKEN" | ${DOCKER} login ghcr.io -u token --password-stdin >/dev/null 2>&1 \
+        || { warn "  [$STACK_NAME] docker login ghcr.io failed; leaving pull to Portainer"; return 1; }
+
+    local img ok=1
+    while IFS= read -r img; do
+        [[ -z "$img" ]] && continue
+        log "  Pre-pulling ${img}:${tag}"
+        ${DOCKER} pull "${img}:${tag}" >/dev/null 2>&1 || { warn "    [$STACK_NAME] pull failed: ${img}:${tag}"; ok=0; }
+    done <<< "$images"
+
+    ${DOCKER} logout ghcr.io >/dev/null 2>&1 || true
+    [[ "$ok" == "1" ]]
+}
+
 # Repos deployen, für die ein gleichnamiges Infisical-Projekt sichtbar ist.
 SKIPPED_STACKS=()
 for i in "${!DEPLOY_REPOS[@]}"; do
@@ -803,6 +851,14 @@ for i in "${!DEPLOY_REPOS[@]}"; do
         warn "  Could not resolve a HEAD sha for '$REPO' — falling back to compose \${IMAGE_TAG:-latest}"
     fi
 
+    # The github-runner stack can't pre-pull the image running this very script
+    # (it doesn't exist yet on first install anyway), so leave it to Portainer.
+    PULL_IMAGE_FLAG=true
+    if [ "$STACK_NAME" != "github-runner" ] && prepull_stack_images; then
+        PULL_IMAGE_FLAG=false
+        ok "  Images pre-pulled on host"
+    fi
+
     # Prüfen ob Stack schon existiert → update vs. create
     EXISTING_ID=$(curl -sfk \
         -H "Authorization: Bearer ${PORTAINER_TOKEN}" \
@@ -825,7 +881,8 @@ for i in "${!DEPLOY_REPOS[@]}"; do
             -d "$(jq -n \
                 --arg content "$STACK_FILE" \
                 --argjson env "$ENV_JSON" \
-                '{stackFileContent: $content, env: $env, pullImage: true}')" 2>/dev/null || true)
+                --argjson pull "$PULL_IMAGE_FLAG" \
+                '{stackFileContent: $content, env: $env, pullImage: $pull}')" 2>/dev/null || true)
         PORTAINER_HTTP="${PORTAINER_HTTP:-000}"
         if [ "$PORTAINER_HTTP" -lt 200 ] || [ "$PORTAINER_HTTP" -ge 300 ]; then
             err "Failed to update Portainer stack '$STACK_NAME' (HTTP ${PORTAINER_HTTP})"
