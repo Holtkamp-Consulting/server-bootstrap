@@ -57,4 +57,60 @@ assert_eq "fail" "$(classify_secrets_response "502")" \
 assert_eq "fail" "$(classify_secrets_response "000")" \
     'curl network failure (000) surfaces as a failure, not a silent skip'
 
+# ── what the classified response does to this script's exit code ─────────────
+# Anchored on code (not line numbers) so the test drives the shipped block.
+extract_secrets_branch() {
+    awk '
+        /^case "\$\(classify_secrets_response/ { capture = 1 }
+        capture { print }
+        capture && /^esac$/ { exit }
+    ' "$ROOT_DIR/redeploy-stacks.sh"
+}
+
+run_secrets_branch() {
+    local driver out status
+    driver=$(mktemp)
+    {
+        printf '%s\n' \
+            'set -euo pipefail' \
+            'SECRETS_HTTP="$1"; SECRETS_RESP="{}"' \
+            'STACK_NAME=stack; PROJECT_ID=proj' \
+            'INFISICAL_ENV=dev; INFISICAL_PATH=/'
+        grep -m1 '^EXIT_SKIPPED=' "$ROOT_DIR/redeploy-stacks.sh"
+        extract_fn classify_secrets_response
+        extract_secrets_branch
+        printf '%s\n' 'echo deployed'
+    } > "$driver"
+
+    out=$(bash "$driver" "$1" 2>/dev/null) && status=0 || status=$?
+    rm -f "$driver"
+    if grep -qx deployed <<<"$out"; then
+        printf '%s deployed' "$status"
+    else
+        printf '%s not-deployed' "$status"
+    fi
+}
+
+assert_eq "0 deployed" "$(run_secrets_branch 200)" \
+    '200 deploys the stack'
+
+# A skip must not look like a successful redeploy: maintenance-redeploy.sh has
+# already stopped the stack and pruned its image before calling this script, so
+# an exit 0 here would leave it down while the job reports success.
+assert_eq "3 not-deployed" "$(run_secrets_branch 400)" \
+    '400 exits with the distinct skip code'
+assert_eq "3 not-deployed" "$(run_secrets_branch 403)" \
+    '403 exits with the distinct skip code'
+assert_eq "3 not-deployed" "$(run_secrets_branch 404)" \
+    '404 exits with the distinct skip code'
+
+assert_eq "1 not-deployed" "$(run_secrets_branch 401)" \
+    '401 fails the run'
+assert_eq "1 not-deployed" "$(run_secrets_branch 429)" \
+    '429 fails the run'
+assert_eq "1 not-deployed" "$(run_secrets_branch 500)" \
+    '500 fails the run'
+assert_eq "1 not-deployed" "$(run_secrets_branch 000)" \
+    'a network failure fails the run'
+
 printf 'PASS: redeploy Infisical secrets-response classification\n'

@@ -29,6 +29,13 @@ fi
 DEPLOY_CONFIG="/etc/infisical-deploy.env"
 PORTAINER_ADMIN="admin"
 
+# Exit code for "this host has no secrets for the stack, nothing was deployed",
+# distinct from both success and failure: maintenance-redeploy.sh tears every
+# stack down before it calls this script, so a skip there leaves the stack
+# stopped and has to be reported rather than counted as a successful redeploy.
+# 3 rather than 2, which bash itself uses for usage and syntax errors.
+EXIT_SKIPPED=3
+
 # Env vars take precedence (container context); fall back to config file (host context).
 if [[ -z "${PORTAINER_URL:-}" ]]; then
     if [[ -r "$DEPLOY_CONFIG" ]]; then
@@ -111,10 +118,10 @@ rm -f "$SECRETS_RESPONSE_FILE"
 
 case "$(classify_secrets_response "$SECRETS_HTTP")" in
     skip)
-        echo "[!] No Infisical secrets available for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP}) — skipping deploy, nothing to redeploy"
+        echo "[!] No Infisical secrets available for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP}) — skipped, nothing deployed"
         echo "[!] Project: $STACK_NAME (${PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
         echo "[!] $(echo "$SECRETS_RESP" | head -c 500)"
-        exit 0
+        exit "$EXIT_SKIPPED"
         ;;
     fail)
         echo "[x] Failed to fetch Infisical secrets for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP})"
