@@ -4,6 +4,9 @@ set -euo pipefail
 STAMP_FILE="/var/lib/server-bootstrap/maintenance-reboot-pending"
 DEPLOY_CONFIG="/etc/infisical-deploy.env"
 PORTAINER_ADMIN="admin"
+# Must match redeploy-stacks.sh's EXIT_SKIPPED (asserted by
+# tests/maintenance_redeploy_skip_test.sh).
+REDEPLOY_EXIT_SKIPPED=3
 
 # Maps this host's persisted Infisical environment to the branch whose images
 # it runs — mirrors install.sh's deploy_branch_for_env(). Duplicated rather than
@@ -68,13 +71,28 @@ echo "[maintenance-redeploy] redeploying all stacks"
 BRANCH=$(redeploy_branch_for_env "${INFISICAL_ENV:-}")
 mapfile -t STACK_NAMES < <(echo "$STACKS_JSON" | jq -r '.[].Name')
 FAILED_STACKS=()
+SKIPPED_STACKS=()
 for name in "${STACK_NAMES[@]}"; do
-    /opt/deploy/redeploy-stacks.sh --stack "$name" --ref "refs/heads/${BRANCH}" \
-        || FAILED_STACKS+=("$name")
+    rc=0
+    /opt/deploy/redeploy-stacks.sh --stack "$name" --ref "refs/heads/${BRANCH}" || rc=$?
+    case "$rc" in
+        0) ;;
+        "$REDEPLOY_EXIT_SKIPPED") SKIPPED_STACKS+=("$name") ;;
+        *) FAILED_STACKS+=("$name") ;;
+    esac
 done
 
 if [[ "${#FAILED_STACKS[@]}" -gt 0 ]]; then
     echo "[maintenance-redeploy] FAILED to redeploy: ${FAILED_STACKS[*]}" >&2
+fi
+# A skip elsewhere costs nothing, but here the stack was running when this job
+# started and the teardown above already stopped it, so a skipped stack stays
+# down. That is a failed maintenance run, not a quiet success: report it and
+# leave the stamp file for the next boot's retry.
+if [[ "${#SKIPPED_STACKS[@]}" -gt 0 ]]; then
+    echo "[maintenance-redeploy] STOPPED and NOT redeployed — no Infisical secrets for environment '${INFISICAL_ENV:-}': ${SKIPPED_STACKS[*]}" >&2
+fi
+if [[ "$(( ${#FAILED_STACKS[@]} + ${#SKIPPED_STACKS[@]} ))" -gt 0 ]]; then
     exit 1
 fi
 

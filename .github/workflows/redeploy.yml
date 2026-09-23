@@ -28,6 +28,11 @@ jobs:
         env:
           DEPLOY_IMAGE_TAG: sha-${{ github.sha }}
         run: |
+          # Exit 3 is redeploy-stacks.sh's EXIT_SKIPPED: this host has no
+          # Infisical secrets for the stack, so there was nothing to deploy and
+          # nothing was torn down either — not a failed push.
+          rc=0
           /opt/deploy/redeploy-stacks.sh \
             --stack "${{ github.event.repository.name }}" \
-            --ref "refs/heads/${{ github.ref_name }}"
+            --ref "refs/heads/${{ github.ref_name }}" || rc=$?
+          [[ "$rc" -eq 0 || "$rc" -eq 3 ]] || exit "$rc"

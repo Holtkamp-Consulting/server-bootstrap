@@ -29,6 +29,13 @@ fi
 DEPLOY_CONFIG="/etc/infisical-deploy.env"
 PORTAINER_ADMIN="admin"
 
+# Exit code for "this host has no secrets for the stack, nothing was deployed",
+# distinct from both success and failure: maintenance-redeploy.sh tears every
+# stack down before it calls this script, so a skip there leaves the stack
+# stopped and has to be reported rather than counted as a successful redeploy.
+# 3 rather than 2, which bash itself uses for usage and syntax errors.
+EXIT_SKIPPED=3
+
 # Env vars take precedence (container context); fall back to config file (host context).
 if [[ -z "${PORTAINER_URL:-}" ]]; then
     if [[ -r "$DEPLOY_CONFIG" ]]; then
@@ -74,20 +81,27 @@ P_Q=$(jq -nr --arg v "$PROJECT_ID"    '$v | @uri')
 E_Q=$(jq -nr --arg v "$INFISICAL_ENV" '$v | @uri')
 PTH_Q=$(jq -nr --arg v "$INFISICAL_PATH" '$v | @uri')
 
-# Classifies the Infisical secrets-fetch response by HTTP status: "ok" (200,
-# proceed), "skip" (404 — this stack's project/env/path isn't provisioned in
-# Infisical yet, e.g. SecretPathNotFound; scoped to this one stack only, not
-# a system-wide problem), or "fail" (anything else — auth errors, 5xx, network
-# errors must still surface, not be swallowed like a 404).
+# Classifies an Infisical secrets-fetch response by HTTP status.
+#
+# GET /api/v4/secrets is scoped to one project AND one environment, so a 4xx
+# from it describes this one stack, not the run: project discovery
+# (GET /api/v1/projects) takes no environment, so a project whose `dev`
+# environment was never provisioned is still discovered and the gap surfaces
+# only here. Infisical expresses it as 400 (environment slug unknown),
+# 403 (identity has no access to this environment) or 404 (SecretPathNotFound)
+# depending on where the lookup stops, so all three skip just this stack.
+#
+# 401 means the Machine Identity token itself is bad or expired — it affects
+# every stack and must stop the run. 429, 5xx and curl's 000 (network failure)
+# are real failures too: swallowing them as skips would let an Infisical outage
+# silently drop stacks from a run that still reports success.
 classify_secrets_response() {
     local http_code="$1"
-    if [[ "$http_code" == "200" ]]; then
-        printf 'ok'
-    elif [[ "$http_code" == "404" ]]; then
-        printf 'skip'
-    else
-        printf 'fail'
-    fi
+    case "$http_code" in
+        200)         printf 'ok' ;;
+        400|403|404) printf 'skip' ;;
+        *)           printf 'fail' ;;
+    esac
 }
 
 # curl without -f so a non-2xx response still yields its body (which carries
@@ -104,10 +118,10 @@ rm -f "$SECRETS_RESPONSE_FILE"
 
 case "$(classify_secrets_response "$SECRETS_HTTP")" in
     skip)
-        echo "[!] No Infisical secrets available for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP}) — skipping deploy, nothing to redeploy"
+        echo "[!] No Infisical secrets available for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP}) — skipped, nothing deployed"
         echo "[!] Project: $STACK_NAME (${PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
         echo "[!] $(echo "$SECRETS_RESP" | head -c 500)"
-        exit 0
+        exit "$EXIT_SKIPPED"
         ;;
     fail)
         echo "[x] Failed to fetch Infisical secrets for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP})"
