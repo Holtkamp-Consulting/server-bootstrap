@@ -25,10 +25,10 @@ assert_eq() {
     fi
 }
 
-# ── classify_secrets_response(http_code) ───────────────────────────────────────
-# The predicate behind issue #11: a 404 (project/env/path not yet provisioned
-# in Infisical, e.g. SecretPathNotFound) must skip only this stack; every other
-# non-200 status must still be treated as a real failure.
+# ── classify_secrets_response(http_code) ────────────────────────────────────────────────
+# The whole 4xx family that says "this project has no such environment/path"
+# (issue #46: an n8n project with no `dev` environment on a Dev-Pi) must skip
+# only this stack. 401 and every transient status must still fail loudly.
 
 assert_eq "ok" "$(classify_secrets_response "200")" \
     '200 proceeds normally'
@@ -36,19 +36,25 @@ assert_eq "ok" "$(classify_secrets_response "200")" \
 assert_eq "skip" "$(classify_secrets_response "404")" \
     '404 (SecretPathNotFound / project or env not provisioned) is skippable'
 
-assert_eq "fail" "$(classify_secrets_response "400")" \
-    '400 is not silently swallowed — surfaces as a failure'
+assert_eq "skip" "$(classify_secrets_response "400")" \
+    '400 (environment slug unknown in this project) is skippable'
+
+assert_eq "skip" "$(classify_secrets_response "403")" \
+    '403 (no access to this environment in this project) is skippable'
 
 assert_eq "fail" "$(classify_secrets_response "401")" \
-    '401 (bad Infisical credentials) surfaces as a failure'
+    '401 (bad/expired Machine Identity token) surfaces as a failure'
 
-assert_eq "fail" "$(classify_secrets_response "403")" \
-    '403 (unauthorized) surfaces as a failure'
+assert_eq "fail" "$(classify_secrets_response "429")" \
+    '429 (rate limited) surfaces as a failure, not a silent skip'
 
 assert_eq "fail" "$(classify_secrets_response "500")" \
     '500 (Infisical server error) surfaces as a failure'
 
+assert_eq "fail" "$(classify_secrets_response "502")" \
+    '502 (Infisical gateway error) surfaces as a failure'
+
 assert_eq "fail" "$(classify_secrets_response "000")" \
     'curl network failure (000) surfaces as a failure, not a silent skip'
 
-printf 'PASS: redeploy Infisical skip-on-404 classification\n'
+printf 'PASS: redeploy Infisical secrets-response classification\n'

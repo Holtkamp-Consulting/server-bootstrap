@@ -652,6 +652,29 @@ fetch_infisical_api() {
     rm -f "$response_file"
 }
 
+# Classifies an Infisical secrets-fetch response by HTTP status.
+#
+# GET /api/v4/secrets is scoped to one project AND one environment, so a 4xx
+# from it describes this one stack, not the run: project discovery
+# (GET /api/v1/projects) takes no environment, so a project whose `dev`
+# environment was never provisioned is still discovered and the gap surfaces
+# only here. Infisical expresses it as 400 (environment slug unknown),
+# 403 (identity has no access to this environment) or 404 (SecretPathNotFound)
+# depending on where the lookup stops, so all three skip just this stack.
+#
+# 401 means the Machine Identity token itself is bad or expired — it affects
+# every stack and must stop the run. 429, 5xx and curl's 000 (network failure)
+# are real failures too: swallowing them as skips would let an Infisical outage
+# silently drop stacks from a run that still reports success.
+classify_secrets_response() {
+    local http_code="$1"
+    case "$http_code" in
+        200)         printf 'ok' ;;
+        400|403|404) printf 'skip' ;;
+        *)           printf 'fail' ;;
+    esac
+}
+
 PROJECTS_RESPONSE=$(fetch_infisical_api "${INFISICAL_API_BASE}/api/v1/projects")
 PROJECTS_HTTP=$(printf '%s\n' "$PROJECTS_RESPONSE" | sed -n '1p')
 PROJECTS_JSON=$(printf '%s\n' "$PROJECTS_RESPONSE" | sed '1d')
@@ -780,21 +803,26 @@ for i in "${!DEPLOY_REPOS[@]}"; do
     SECRETS_HTTP=$(printf '%s\n' "$SECRETS_RESPONSE" | sed -n '1p')
     SECRETS_JSON=$(printf '%s\n' "$SECRETS_RESPONSE" | sed '1d')
 
-    if [ "$SECRETS_HTTP" != "200" ] || ! echo "$SECRETS_JSON" | jq -e '.secrets | type == "array"' >/dev/null 2>&1; then
-        # Auth-Fehler sind global (falsche Machine Identity) → hart abbrechen.
-        if [ "$SECRETS_HTTP" = "401" ] || [ "$SECRETS_HTTP" = "403" ]; then
-            err "Infisical authentication/authorization failed for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP})"
+    SECRETS_STATE="$(classify_secrets_response "$SECRETS_HTTP")"
+    if [ "$SECRETS_STATE" = "ok" ] && ! echo "$SECRETS_JSON" | jq -e '.secrets | type == "array"' >/dev/null 2>&1; then
+        SECRETS_STATE="fail"
+    fi
+
+    case "$SECRETS_STATE" in
+        skip)
+            warn "No Infisical secrets for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP}) — skipping"
+            warn "Project: ${STACK_PROJECT_NAME} (${STACK_PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
+            warn "$(echo "$SECRETS_JSON" | head -c 500)"
+            SKIPPED_STACKS+=("$STACK_NAME")
+            continue
+            ;;
+        fail)
+            err "Failed to fetch Infisical secrets for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP})"
             err "Project: ${STACK_PROJECT_NAME} (${STACK_PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
             err "$(echo "$SECRETS_JSON" | head -c 500)"
             exit 1
-        fi
-        # Fehlende Umgebung/Pfad (404/400/…) betrifft nur diesen Stack → überspringen, Loop läuft weiter.
-        warn "No Infisical secrets for stack '$STACK_NAME' (HTTP ${SECRETS_HTTP}) — skipping"
-        warn "Project: ${STACK_PROJECT_NAME} (${STACK_PROJECT_ID}), env: ${INFISICAL_ENV}, path: ${INFISICAL_PATH}"
-        warn "$(echo "$SECRETS_JSON" | head -c 500)"
-        SKIPPED_STACKS+=("$STACK_NAME")
-        continue
-    fi
+            ;;
+    esac
 
     ENV_JSON=$(echo "$SECRETS_JSON" \
         | jq '

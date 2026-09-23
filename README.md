@@ -55,6 +55,8 @@ For each matching project/repository pair:
 
 Projects without a matching GitHub repository are skipped. Repositories without a matching Infisical project are not deployed.
 
+Project discovery is environment-agnostic, but secrets are fetched per environment, so a project that exists without the host's `INFISICAL_ENV` environment (e.g. a prod-only project seen by a dev host) only shows up at the secrets fetch. That stack is skipped and listed at the end of the run; the remaining stacks still deploy. A bad or expired Machine Identity token, a rate limit, an Infisical 5xx or an unreachable Infisical abort the run instead of being skipped silently. `redeploy-stacks.sh` classifies the same statuses identically — both copies are covered by `tests/install_infisical_skip_test.sh` and `tests/redeploy_infisical_skip_test.sh`.
+
 ## Read-only Portainer API proxy
 
 `install.sh` deploys a small reverse proxy (`caddy:2-alpine`, port `9444`, `--restart=always`) in front of the host-local Portainer API, so external consumers — such as the [Server-Topologie](https://github.com/Holtkamp-Consulting/Server-Topologie) backend — can read container and network inventory without ever holding a Portainer credential.
