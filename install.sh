@@ -326,8 +326,36 @@ if ! command -v jq &>/dev/null; then
     ok "jq installed"
 fi
 
-# ── 1. Docker ─────────────────────────────────────────────────────────────────
-log "Step 1/9 — Docker"
+# ── 1. Persistent journal ─────────────────────────────────────────────────────
+# Runs first so a host keeps logs across reboots even when a later step aborts.
+#
+# journald applies drop-ins from /usr/lib, /run and /etc together in filename
+# order, last one wins — the unnumbered name sorts after numbered vendor
+# drop-ins (e.g. a distro's Storage=volatile) so this one takes effect.
+JOURNALD_DROPIN=/etc/systemd/journald.conf.d/server-bootstrap.conf
+
+configure_persistent_journal() {
+    local desired=$'[Journal]\nStorage=persistent\nSystemMaxUse=500M\n'
+
+    sudo mkdir -p /var/log/journal
+
+    if printf '%s' "$desired" | sudo cmp -s - "$JOURNALD_DROPIN"; then
+        ok "Persistent journal already configured — skipping"
+        return 0
+    fi
+
+    sudo mkdir -p "$(dirname "$JOURNALD_DROPIN")"
+    printf '%s' "$desired" | sudo tee "$JOURNALD_DROPIN" > /dev/null
+    sudo systemctl restart systemd-journald
+    sudo journalctl --flush
+    ok "Persistent journal enabled ($JOURNALD_DROPIN, SystemMaxUse=500M)"
+}
+
+log "Step 1/10 — Persistent systemd journal"
+configure_persistent_journal
+
+# ── 2. Docker ─────────────────────────────────────────────────────────────────
+log "Step 2/10 — Docker"
 
 if command -v docker &>/dev/null; then
     ok "Docker already installed ($(docker --version | cut -d' ' -f3 | tr -d ','))"
@@ -343,8 +371,8 @@ if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
     sudo systemctl enable --now docker
 fi
 
-# ── 2. Portainer ───────────────────────────────────────────────────────────────
-log "Step 2/9 — Portainer CE"
+# ── 3. Portainer ───────────────────────────────────────────────────────────────
+log "Step 3/10 — Portainer CE"
 
 # Use sudo only if the current user can't write to the socket directly
 if [ -w /var/run/docker.sock ]; then
@@ -370,8 +398,8 @@ else
     ok "Portainer container started"
 fi
 
-# ── 3. Credentials ─────────────────────────────────────────────────────────────
-log "Step 3/9 — Configuring admin credentials"
+# ── 4. Credentials ─────────────────────────────────────────────────────────────
+log "Step 4/10 — Configuring admin credentials"
 
 PORTAINER_API="http://localhost:${PORTAINER_PORT_HTTP}"
 MAX_WAIT=90
@@ -411,8 +439,8 @@ case "$INIT_HTTP" in
     *)       err "Failed to initialise admin user (HTTP ${INIT_HTTP})"; exit 1 ;;
 esac
 
-# ── 4. Infisical CLI ───────────────────────────────────────────────────────────
-log "Step 4/9 — Infisical CLI"
+# ── 5. Infisical CLI ───────────────────────────────────────────────────────────
+log "Step 5/10 — Infisical CLI"
 
 if command -v infisical &>/dev/null; then
     ok "Infisical CLI already installed ($(infisical --version 2>&1 | head -1))"
@@ -422,8 +450,8 @@ else
     ok "Infisical CLI installed"
 fi
 
-# ── 5. Credentials ────────────────────────────────────────────────────────────
-log "Step 5/9 — Infisical + GitHub credentials"
+# ── 6. Credentials ────────────────────────────────────────────────────────────
+log "Step 6/10 — Infisical + GitHub credentials"
 
 if [ -f "$DEPLOY_CONFIG" ]; then
     warn "Deploy config already exists at $DEPLOY_CONFIG — skipping credential setup"
@@ -514,8 +542,8 @@ github_branch_head_sha() {
         | jq -r '.sha // empty' 2>/dev/null || true
 }
 
-# ── 6. Stacks deployen ─────────────────────────────────────────────────────────
-log "Step 6/9 — Stack deployment from GitHub"
+# ── 7. Stacks deployen ─────────────────────────────────────────────────────────
+log "Step 7/10 — Stack deployment from GitHub"
 
 # Portainer JWT immer frisch holen (cached token kann abgelaufen sein)
 log "Refreshing Portainer API token..."
@@ -960,12 +988,12 @@ if [ "${#SKIPPED_STACKS[@]}" -gt 0 ]; then
     warn "Skipped ${#SKIPPED_STACKS[@]} stack(s) without Infisical secrets: ${SKIPPED_STACKS[*]}"
 fi
 
-# ── 7. Portainer read-only API proxy ──────────────────────────────────────────
-# Deliberately its own top-level step, not nested in Step 2: a run against an
-# already-bootstrapped host hits Step 2's "already running — skipping" branch,
+# ── 8. Portainer read-only API proxy ──────────────────────────────────────────
+# Deliberately its own top-level step, not nested in Step 3: a run against an
+# already-bootstrapped host hits Step 3's "already running — skipping" branch,
 # and the proxy must still be added retroactively there.
 #
-# Extracted into a function (rather than left as inline Step 7 body) so its
+# Extracted into a function (rather than left as inline Step 8 body) so its
 # three branches — idempotency skip, stale-token reuse, fresh mint — can be
 # unit-tested with stubbed docker/curl/sudo, per tests/install_portainer_proxy_step_test.sh.
 deploy_portainer_proxy() {
@@ -989,7 +1017,7 @@ deploy_portainer_proxy() {
     if [ -z "${PORTAINER_ACCESS_TOKEN:-}" ]; then
         log "Creating Portainer access token for the read-only proxy..."
         # mint_portainer_access_token needs JWT (it rejects X-API-Key auth);
-        # $jwt is the admin JWT Step 6 just refreshed, still fresh here.
+        # $jwt is the admin JWT Step 7 just refreshed, still fresh here.
         local PROXY_ADMIN_ID
         PROXY_ADMIN_ID=$(resolve_portainer_admin_id "$jwt")
         if [ -z "$PROXY_ADMIN_ID" ]; then
@@ -1051,11 +1079,11 @@ deploy_portainer_proxy() {
     ok "Portainer read-only proxy started on port ${PORTAINER_PROXY_PORT}"
 }
 
-log "Step 7/9 — Portainer read-only API proxy"
+log "Step 8/10 — Portainer read-only API proxy"
 deploy_portainer_proxy "$PORTAINER_TOKEN"
 
-# ── 8. Redeploy script ────────────────────────────────────────────────────────
-log "Step 8/9 — Installing redeploy-stacks.sh"
+# ── 9. Redeploy script ────────────────────────────────────────────────────────
+log "Step 9/10 — Installing redeploy-stacks.sh"
 
 sudo mkdir -p /opt/deploy
 curl -fsSL \
@@ -1064,8 +1092,8 @@ curl -fsSL \
 sudo chmod +x /opt/deploy/redeploy-stacks.sh
 ok "Installed /opt/deploy/redeploy-stacks.sh"
 
-# ── 9. Scheduled maintenance ──────────────────────────────────────────────────
-log "Step 9/9 — Installing scheduled maintenance timer"
+# ── 10. Scheduled maintenance ──────────────────────────────────────────────────
+log "Step 10/10 — Installing scheduled maintenance timer"
 
 sudo mkdir -p /opt/deploy /var/lib/server-bootstrap
 

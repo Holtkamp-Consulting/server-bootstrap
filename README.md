@@ -128,6 +128,30 @@ The runner container reads Portainer and Infisical credentials from `/etc/infisi
 
 The runner uses `network_mode: host` so it can reach Portainer at `localhost:9000`.
 
+## Persistent journal
+
+Step 1 of `install.sh` makes the systemd journal persistent, so logs from a previous boot survive a reboot or a power cut. Without it, a host that drops off the network and has to be power-cycled leaves nothing to diagnose: `journalctl -b -1` only answers `no persistent journal was found` (this happened to the dev Pi after it hung; whether the weekly maintenance upgrade/reboot or undervoltage was the cause could not be determined).
+
+The step creates `/var/log/journal` and writes the drop-in `/etc/systemd/journald.conf.d/server-bootstrap.conf`:
+
+```ini
+[Journal]
+Storage=persistent
+SystemMaxUse=500M
+```
+
+`SystemMaxUse` caps the journal's disk usage so it cannot fill the SD card. `journald.conf` itself is left untouched. `systemd-journald` is restarted and the runtime journal flushed to disk only when the drop-in was missing or had different content; re-running `install.sh` on a configured host changes nothing.
+
+Inspect previous boots:
+
+```bash
+journalctl --list-boots                 # boots recorded on disk
+journalctl -b -1 -e                     # end of the previous boot's log, i.e. what happened right before it went down
+journalctl -b -1 -p warning             # warnings and errors of the previous boot
+journalctl -b -1 -k | grep -i voltage   # kernel undervoltage warnings
+journalctl --disk-usage
+```
+
 ## Scheduled maintenance
 
 `install.sh` provisions a systemd timer that runs every Saturday at 00:00 (configurable per host via `MAINTENANCE_SCHEDULE`, see [Configuration](#configuration)) on both dev and prod. Because a self-triggered `reboot` returns immediately and cannot be followed by more work in the same systemd unit, the job is split into two chained services around the reboot:
