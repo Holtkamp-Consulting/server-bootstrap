@@ -64,23 +64,67 @@ CONTAINER_IDS=$(docker ps -a --format '{{.ID}} {{.Names}}' | awk '$2 != "portain
 # shellcheck disable=SC2086
 [[ -n "$CONTAINER_IDS" ]] && docker rm -f $CONTAINER_IDS
 
+PRUNE_ATTEMPTS=3
+PRUNE_BACKOFF_SECONDS=10
+
+# Docker rejects a prune while another of the same kind is still in flight
+# ("a prune operation is already running"), which happens at boot. By now every
+# container is already removed, so aborting on that transient error leaves every
+# stack down; retry with a growing backoff instead.
+prune_with_retry() {
+    local attempt
+    for (( attempt = 1; attempt <= PRUNE_ATTEMPTS; attempt++ )); do
+        "$@" && return 0
+        (( attempt < PRUNE_ATTEMPTS )) && sleep $(( PRUNE_BACKOFF_SECONDS * attempt ))
+    done
+    return 1
+}
+
+# Only the images have to go — the redeploy below resolves the branch's moving
+# tag, which is safe only when no cached image of it is left. So when the full
+# system prune keeps failing, an image-only prune still satisfies that.
+prune_images() {
+    prune_with_retry docker system prune -a -f && return 0
+    echo "[maintenance-redeploy] docker system prune failed; falling back to docker image prune" >&2
+    prune_with_retry docker image prune -a -f
+}
+
 echo "[maintenance-redeploy] pruning all images"
-docker system prune -a -f
+# Redeploying onto cached moving-tag images would silently reuse stale ones, so
+# this is the one failure that must stop the job with every stack down; the
+# stamp file stays, so the next boot retries the whole run.
+prune_images || { echo "[maintenance-redeploy] could not prune images — not redeploying onto stale cached images" >&2; exit 1; }
 
 echo "[maintenance-redeploy] redeploying all stacks"
 BRANCH=$(redeploy_branch_for_env "${INFISICAL_ENV:-}")
 mapfile -t STACK_NAMES < <(echo "$STACKS_JSON" | jq -r '.[].Name')
-FAILED_STACKS=()
+# Sets FAILED_STACKS to the stacks of "$@" that failed; appends skips to
+# SKIPPED_STACKS.
+redeploy_pass() {
+    local name rc
+    FAILED_STACKS=()
+    for name in "$@"; do
+        rc=0
+        /opt/deploy/redeploy-stacks.sh --stack "$name" --ref "refs/heads/${BRANCH}" || rc=$?
+        case "$rc" in
+            0) ;;
+            "$REDEPLOY_EXIT_SKIPPED") SKIPPED_STACKS+=("$name") ;;
+            *) FAILED_STACKS+=("$name") ;;
+        esac
+    done
+}
+
 SKIPPED_STACKS=()
-for name in "${STACK_NAMES[@]}"; do
-    rc=0
-    /opt/deploy/redeploy-stacks.sh --stack "$name" --ref "refs/heads/${BRANCH}" || rc=$?
-    case "$rc" in
-        0) ;;
-        "$REDEPLOY_EXIT_SKIPPED") SKIPPED_STACKS+=("$name") ;;
-        *) FAILED_STACKS+=("$name") ;;
-    esac
-done
+redeploy_pass "${STACK_NAMES[@]}"
+# The prune also removed networks that one stack creates and another joins as
+# external (n8n reaches focus's Postgres over focus_focus-network), so a stack
+# can fail only because it came before its dependency in Portainer's order. A
+# second pass, once every other stack had its turn, resolves that without
+# encoding the dependencies here; a skip is deterministic and is not retried.
+if [[ "${#FAILED_STACKS[@]}" -gt 0 ]]; then
+    echo "[maintenance-redeploy] retrying after first pass: ${FAILED_STACKS[*]}"
+    redeploy_pass "${FAILED_STACKS[@]}"
+fi
 
 if [[ "${#FAILED_STACKS[@]}" -gt 0 ]]; then
     echo "[maintenance-redeploy] FAILED to redeploy: ${FAILED_STACKS[*]}" >&2

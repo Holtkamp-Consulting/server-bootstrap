@@ -19,14 +19,15 @@ assert_eq() {
 # the file, which is where the stamp file is removed.
 extract_redeploy_loop() {
     awk '
-        /^FAILED_STACKS=\(\)$/ { capture = 1 }
+        /^redeploy_pass\(\) \{$/ { capture = 1 }
         capture { print }
     ' "$ROOT_DIR/maintenance-redeploy.sh"
 }
 
 # Runs the extracted block over the named stacks against a stubbed
 # redeploy-stacks.sh that exits by stack name: `skipped` → EXIT_SKIPPED,
-# `broken` → 1, anything else → deployed. Prints
+# `broken` → 1, `needs-alpha` → 1 until `alpha` was deployed (a stack joining
+# a network another stack creates), anything else → deployed. Prints
 # "<exit code> stamp=<kept|removed> <messages>".
 run_redeploy_loop() {
     local driver stamp out status
@@ -47,9 +48,10 @@ run_redeploy_loop() {
             '        case $1 in --stack) name="$2"; shift 2 ;; *) shift ;; esac' \
             '    done' \
             '    case "$name" in' \
-            '        skipped) return "$REDEPLOY_EXIT_SKIPPED" ;;' \
-            '        broken)  return 1 ;;' \
-            '        *)       return 0 ;;' \
+            '        skipped)     return "$REDEPLOY_EXIT_SKIPPED" ;;' \
+            '        broken)      return 1 ;;' \
+            '        needs-alpha) [[ -n "${ALPHA_UP:-}" ]] || return 1 ;;' \
+            '        alpha)       ALPHA_UP=1 ;;' \
             '    esac' \
             '}'
         extract_redeploy_loop
@@ -71,15 +73,23 @@ assert_eq "0 stamp=removed [maintenance-redeploy] complete" \
     "$(run_redeploy_loop alpha beta)" \
     'all stacks redeployed → success, stamp cleared'
 
-assert_eq "1 stamp=kept [maintenance-redeploy] FAILED to redeploy: broken" \
+assert_eq "1 stamp=kept [maintenance-redeploy] retrying after first pass: broken [maintenance-redeploy] FAILED to redeploy: broken" \
     "$(run_redeploy_loop alpha broken)" \
-    'a failed stack fails the job and keeps the stamp file for the next boot'
+    'a stack failing both passes fails the job and keeps the stamp file for the next boot'
+
+assert_eq "0 stamp=removed [maintenance-redeploy] retrying after first pass: needs-alpha [maintenance-redeploy] complete" \
+    "$(run_redeploy_loop needs-alpha alpha)" \
+    'a stack deployed before the stack it depends on comes back on the retry pass'
+
+assert_eq "1 stamp=kept [maintenance-redeploy] retrying after first pass: needs-alpha broken [maintenance-redeploy] FAILED to redeploy: broken" \
+    "$(run_redeploy_loop needs-alpha broken alpha)" \
+    'only stacks failing the retry pass too are reported as failed'
 
 assert_eq "1 stamp=kept [maintenance-redeploy] STOPPED and NOT redeployed — no Infisical secrets for environment 'dev': skipped" \
     "$(run_redeploy_loop alpha skipped)" \
     'a skipped stack was torn down and stays down — it must not report success'
 
-assert_eq "1 stamp=kept [maintenance-redeploy] FAILED to redeploy: broken [maintenance-redeploy] STOPPED and NOT redeployed — no Infisical secrets for environment 'dev': skipped" \
+assert_eq "1 stamp=kept [maintenance-redeploy] retrying after first pass: broken [maintenance-redeploy] FAILED to redeploy: broken [maintenance-redeploy] STOPPED and NOT redeployed — no Infisical secrets for environment 'dev': skipped" \
     "$(run_redeploy_loop broken skipped alpha)" \
     'failed and skipped stacks are reported separately'
 
