@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# awk-extract the pure-ish helpers plus the Step 7 orchestration function —
+# awk-extract the pure-ish helpers plus the Step 8 orchestration function —
 # install.sh runs top-to-bottom and would execute its full bootstrap if
 # sourced directly.
 eval "$(
@@ -216,13 +216,14 @@ assert_contains "$(cat "$deploy_config")" "PORTAINER_ACCESS_TOKEN='rotated-token
 assert_not_contains "$(cat "$deploy_config")" "stale-revoked-token" \
     'stale token line is removed, not left alongside the new one (no duplicate keys)'
 
-# ── Step N/9 renumbering sanity check ────────────────────────────────────────
+# ── Step N/10 renumbering sanity check ───────────────────────────────────────
 # Guards against a future edit reintroducing a gap or duplicate in the
-# "Step N/9" log lines (e.g. this PR's own 1/8→1/9 ... 8/8→9/9 renumbering).
-step_numbers="$(grep -o 'Step [0-9]*/9' "$ROOT_DIR/install.sh" | sed 's#Step ##; s#/9##' | sort -n)"
+# "Step N/10" log lines (e.g. the 1/9→2/10 ... 9/9→10/10 renumbering when the
+# persistent-journal step became Step 1).
+step_numbers="$(grep -o 'Step [0-9]*/10' "$ROOT_DIR/install.sh" | sed 's#Step ##; s#/10##' | sort -n)"
 assert_eq \
-    "$(printf '1\n2\n3\n4\n5\n6\n7\n8\n9')" \
+    "$(printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10')" \
     "$step_numbers" \
-    'Step N/9 log lines cover exactly 1 through 9 with no gaps or duplicates'
+    'Step N/10 log lines cover exactly 1 through 10 with no gaps or duplicates'
 
 printf 'PASS: install portainer proxy step (idempotency skip / token reuse / mint)\n'

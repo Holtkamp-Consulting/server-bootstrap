@@ -1,6 +1,6 @@
 # Read-only reverse proxy in front of the local Portainer API.
 #
-# Deployed by install.sh (Step 7/9). Allows GET-only access to a small
+# Deployed by install.sh (Step 8/10). Allows GET-only access to a small
 # allowlist of Portainer API routes and injects the Portainer credential
 # host-side via the PORTAINER_ACCESS_TOKEN environment variable — callers
 # authenticate only against this proxy and never see the underlying

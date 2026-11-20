@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Integration test for the read-only Portainer API proxy deployed by
-# install.sh (Step 7/9). Renders the checked-in Caddyfile the same way
+# install.sh (Step 8/10). Renders the checked-in Caddyfile the same way
 # install.sh does, runs it against a mock upstream, and asserts both the
 # allowlist behaviour and that the injected Portainer credential never
 # reaches the caller.
