@@ -1,0 +1,60 @@
+name: Diagnose pi-prod (read-only)
+
+# Temporary, read-only diagnosis of pi-prod during the 2026-11-21 outage.
+# Changes nothing on the host. Delete this branch afterwards.
+on:
+  push:
+    branches: [diag/pi-prod-20261121]
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, portainer, prod]
+    timeout-minutes: 10
+    steps:
+      - name: Runner view
+        continue-on-error: true
+        run: |
+          set +e
+          echo "== date"; date -u
+          echo "== df -h (runner container; / is the Docker data filesystem)"; df -h
+          echo "== df -i"; df -i
+          echo "== free -h"; free -h
+          echo "== uptime / loadavg"; uptime; cat /proc/loadavg
+          echo "== docker ps -a"; docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}'
+          echo "== docker volume ls"; docker volume ls
+          echo "== docker system df"; docker system df
+      - name: Container logs
+        continue-on-error: true
+        run: |
+          set +e
+          for c in postgres-db focus-backend focus-nginx n8n_app portainer focus-pg-backup; do
+            echo "================ $c"
+            docker inspect -f 'State={{.State.Status}} Exit={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Restarts={{.RestartCount}} Started={{.State.StartedAt}} Finished={{.State.FinishedAt}} Error={{.State.Error}}' "$c"
+            docker logs --tail 40 "$c" 2>&1
+          done
+      - name: Host view (read-only, via nsenter into PID 1)
+        continue-on-error: true
+        run: |
+          set +e
+          IMG=$(docker inspect -f '{{.Config.Image}}' "$(hostname)" 2>/dev/null || echo myoung34/github-runner:latest)
+          docker run --rm --privileged --pid=host --net=host --pull=never "$IMG" \
+            nsenter -t 1 -m -u -i -n -p -- sh -c '
+              echo "== host uptime"; uptime
+              echo "== host df -h"; df -h
+              echo "== host df -i"; df -i /
+              echo "== host free -h"; free -h
+              echo "== timezone"; timedatectl 2>/dev/null | grep -i zone
+              echo "== failed units"; systemctl --failed --no-legend
+              echo "== timers"; systemctl list-timers maintenance-update.timer --no-pager
+              echo "== stamp"; ls -l /var/lib/server-bootstrap/ 2>&1
+              echo "== installed redeploy script"; grep -c "image prune" /opt/deploy/maintenance-redeploy.sh; grep -cE "docker rm|system prune" /opt/deploy/maintenance-redeploy.sh
+              echo "== largest under /var/lib/docker"; du -xh --max-depth=1 /var/lib/docker 2>/dev/null | sort -h | tail -8
+              echo "== largest container logs"; du -h /var/lib/docker/containers/*/*-json.log 2>/dev/null | sort -h | tail -5
+              echo "== largest volumes"; du -sh /var/lib/docker/volumes/* 2>/dev/null | sort -h | tail -8
+              echo "== journal usage"; journalctl --disk-usage
+              echo "== boots"; journalctl --list-boots --no-pager 2>/dev/null | tail -5
+              echo "== maintenance units (this boot)"; journalctl -u maintenance-update -u maintenance-redeploy -b --no-pager -n 60
+              echo "== sshd"; journalctl -u ssh -u sshd -b --no-pager -n 20
+              echo "== kernel: oom / io / disk errors"; journalctl -k -b --no-pager | grep -iE "oom|killed process|i/o error|ext4|mmc|under-voltage|throttl" | tail -30
+              echo "== top memory"; ps aux --sort=-rss | head -12
+            '
