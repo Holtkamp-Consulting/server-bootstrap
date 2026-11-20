@@ -14,42 +14,38 @@ assert_eq() {
     fi
 }
 
-# The prune step, from its settings through the call that gates the redeploy,
-# anchored on code (not line numbers) so the test drives the shipped block.
+# The prune step, from its settings through the prune call, anchored on code
+# (not line numbers) so the test drives the shipped block.
 extract_prune_step() {
     awk '
         /^PRUNE_ATTEMPTS=/ { capture = 1 }
         capture { print }
-        capture && /^prune_images \|\|/ { exit }
+        capture && /could not prune unused images/ { exit }
     ' "$ROOT_DIR/maintenance-redeploy.sh"
 }
 
-# Runs the extracted block against a stubbed docker whose `system prune` fails
-# the first $1 calls and whose `image prune` fails the first $2 calls, with the
-# same "already running" error the daemon returns. `sleep` only records its
-# delay. Prints "<exit code> <calls and messages>"; REDEPLOY marks that the
-# script went on to the redeploy loop.
+# Runs the extracted block against a stubbed docker whose `image prune` fails
+# the first $1 calls with the "already running" error the daemon returns.
+# `sleep` only records its delay. Prints "<exit code> <calls and messages>";
+# AFTER marks that the script went on past the prune.
 run_prune_step() {
     local driver out status
     driver=$(mktemp)
     {
         printf '%s\n' \
             'set -euo pipefail' \
-            'system_failures=$1 image_failures=$2' \
+            'failures=$1' \
             'docker() {' \
             '    echo "docker $*"' \
-            '    local kind=$1' \
-            '    if [[ $kind == system && $system_failures -gt 0 ]] \' \
-            '        || [[ $kind == image && $image_failures -gt 0 ]]; then' \
-            '        [[ $kind == system ]] && system_failures=$((system_failures - 1))' \
-            '        [[ $kind == image ]] && image_failures=$((image_failures - 1))' \
+            '    if [[ $failures -gt 0 ]]; then' \
+            '        failures=$((failures - 1))' \
             '        echo "Error response from daemon: a prune operation is already running" >&2' \
             '        return 1' \
             '    fi' \
             '}' \
             'sleep() { echo "sleep $1"; }'
         extract_prune_step
-        printf '%s\n' 'echo REDEPLOY'
+        printf '%s\n' 'echo AFTER'
     } > "$driver"
 
     out=$(bash "$driver" "$@" 2>&1) && status=0 || status=$?
@@ -58,24 +54,39 @@ run_prune_step() {
 }
 
 # ── the maintenance prune step ────────────────────────────────────────────────
-# Every container is already removed when this step runs, so exiting here
-# leaves every stack down until the next boot. Only a failure to remove the
-# images justifies that: the redeploy uses the branch's moving tag and would
-# otherwise silently reuse a stale cached image.
-assert_eq "0 [maintenance-redeploy] pruning all images docker system prune -a -f REDEPLOY" \
-    "$(run_prune_step 0 0)" \
-    'prune succeeds → redeploy runs'
+# The prune is housekeeping after every stack is back: its failure costs disk
+# space, never uptime, so it must never fail the job.
+assert_eq "0 [maintenance-redeploy] pruning unused images docker image prune -a -f AFTER" \
+    "$(run_prune_step 0)" \
+    'prune succeeds → job continues'
 
-assert_eq "0 [maintenance-redeploy] pruning all images docker system prune -a -f sleep 10 docker system prune -a -f sleep 20 docker system prune -a -f REDEPLOY" \
-    "$(run_prune_step 2 0)" \
-    'a prune already running is retried with backoff instead of aborting the job'
+assert_eq "0 [maintenance-redeploy] pruning unused images docker image prune -a -f sleep 10 docker image prune -a -f sleep 20 docker image prune -a -f AFTER" \
+    "$(run_prune_step 2)" \
+    'a prune already running is retried with backoff'
 
-assert_eq "0 [maintenance-redeploy] pruning all images docker system prune -a -f sleep 10 docker system prune -a -f sleep 20 docker system prune -a -f [maintenance-redeploy] docker system prune failed; falling back to docker image prune docker image prune -a -f REDEPLOY" \
-    "$(run_prune_step 99 0)" \
-    'a persistently failing system prune falls back to an image prune and still redeploys'
+assert_eq "0 [maintenance-redeploy] pruning unused images docker image prune -a -f sleep 10 docker image prune -a -f sleep 20 docker image prune -a -f [maintenance-redeploy] WARNING: could not prune unused images; continuing AFTER" \
+    "$(run_prune_step 99)" \
+    'a persistently failing prune only warns'
 
-assert_eq "1 [maintenance-redeploy] pruning all images docker system prune -a -f sleep 10 docker system prune -a -f sleep 20 docker system prune -a -f [maintenance-redeploy] docker system prune failed; falling back to docker image prune docker image prune -a -f sleep 10 docker image prune -a -f sleep 20 docker image prune -a -f [maintenance-redeploy] could not prune images — not redeploying onto stale cached images" \
-    "$(run_prune_step 99 99)" \
-    'images that cannot be pruned at all stop the job before the moving-tag redeploy'
+# ── nothing destructive before the redeploy ───────────────────────────────────
+# On 2026-11-10 the job stopped every stack, removed every container, then
+# died on the prune and left production down. Guard the shape, not just the
+# behavior: no stack stop, no container removal, no system prune (which also
+# removes networks other stacks join as external), and the only prune comes
+# after the redeploy and the health check.
+SCRIPT="$ROOT_DIR/maintenance-redeploy.sh"
+code_only() { grep -v '^[[:space:]]*#' "$SCRIPT"; }
+assert_eq "" "$(code_only | grep -E '/stop|docker rm|docker (container|network|system) prune' || true)" \
+    'maintenance-redeploy.sh never stops stacks, removes containers or system-prunes'
+
+line_of() { code_only | grep -n -m1 -- "$1" | cut -d: -f1; }
+REDEPLOY_LINE=$(line_of '^redeploy_pass "\${STACK_NAMES')
+HEALTH_LINE=$(line_of '^    wait_until_healthy ')
+PRUNE_LINE=$(line_of '^prune_with_retry docker')
+[[ -n "$REDEPLOY_LINE" && -n "$HEALTH_LINE" && -n "$PRUNE_LINE" ]] \
+    || { echo "FAIL: could not locate redeploy/health/prune lines" >&2; exit 1; }
+assert_eq "ordered" \
+    "$([[ $REDEPLOY_LINE -lt $HEALTH_LINE && $HEALTH_LINE -lt $PRUNE_LINE ]] && echo ordered || echo "$REDEPLOY_LINE/$HEALTH_LINE/$PRUNE_LINE")" \
+    'redeploy → health check → prune'
 
 printf 'PASS: maintenance redeploy prune handling\n'

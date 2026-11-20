@@ -27,8 +27,9 @@ extract_redeploy_loop() {
 # Runs the extracted block over the named stacks against a stubbed
 # redeploy-stacks.sh that exits by stack name: `skipped` → EXIT_SKIPPED,
 # `broken` → 1, `needs-alpha` → 1 until `alpha` was deployed (a stack joining
-# a network another stack creates), anything else → deployed. Prints
-# "<exit code> stamp=<kept|removed> <messages>".
+# a network another stack creates), anything else → deployed. The stubbed
+# docker reports every stack's containers as running, except `crashloop`'s,
+# which keep restarting. Prints "<exit code> stamp=<kept|removed> <messages>".
 run_redeploy_loop() {
     local driver stamp out status
     driver=$(mktemp)
@@ -39,7 +40,9 @@ run_redeploy_loop() {
             'STAMP_FILE="$1"; shift' \
             'STACK_NAMES=("$@")' \
             'INFISICAL_ENV=dev' \
-            'BRANCH=main'
+            'BRANCH=main' \
+            'HEALTH_TIMEOUT_SECONDS=0' \
+            'HEALTH_SETTLE_SECONDS=0'
         grep -m1 '^REDEPLOY_EXIT_SKIPPED=' "$ROOT_DIR/maintenance-redeploy.sh"
         printf '%s\n' \
             '/opt/deploy/redeploy-stacks.sh() {' \
@@ -53,7 +56,15 @@ run_redeploy_loop() {
             '        needs-alpha) [[ -n "${ALPHA_UP:-}" ]] || return 1 ;;' \
             '        alpha)       ALPHA_UP=1 ;;' \
             '    esac' \
-            '}'
+            '}' \
+            'docker() {' \
+            '    [[ $1 == ps ]] || return 0' \
+            '    case "$*" in' \
+            '        *project=crashloop*) echo "restarting|Restarting (1) 3 seconds ago" ;;' \
+            '        *) echo "running|Up 2 minutes (healthy)" ;;' \
+            '    esac' \
+            '}' \
+            'sleep() { :; }'
         extract_redeploy_loop
     } > "$driver"
 
@@ -64,32 +75,39 @@ run_redeploy_loop() {
     printf '%s stamp=%s %s' "$status" "$stamp_state" "$(echo "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
 }
 
+WAIT='[maintenance-redeploy] waiting for redeployed stacks to become healthy'
+SETTLE="[maintenance-redeploy] all healthy; re-checking after 0s"
+DONE='[maintenance-redeploy] pruning unused images [maintenance-redeploy] complete'
+
 # ── the maintenance redeploy loop ─────────────────────────────────────────────
-# Every stack is stopped, its containers removed and every image pruned before
-# this loop runs, so a stack this loop does not bring back stays down until
-# someone notices. Reporting "complete" and clearing the stamp file (which
-# disarms the next boot's retry) is only correct when every stack came back.
-assert_eq "0 stamp=removed [maintenance-redeploy] complete" \
+# Stacks are redeployed in place, so a failed stack keeps what was running. The
+# job still has to fail (keeping the stamp file and firing the OnFailure=
+# alert) whenever a stack did not come back on the new version and healthy.
+assert_eq "0 stamp=removed $WAIT $SETTLE $DONE" \
     "$(run_redeploy_loop alpha beta)" \
-    'all stacks redeployed → success, stamp cleared'
+    'all stacks redeployed and healthy → success, prune, stamp cleared'
 
-assert_eq "1 stamp=kept [maintenance-redeploy] retrying after first pass: broken [maintenance-redeploy] FAILED to redeploy: broken" \
+assert_eq "1 stamp=kept [maintenance-redeploy] retrying after first pass: broken [maintenance-redeploy] FAILED to redeploy: broken $WAIT $SETTLE" \
     "$(run_redeploy_loop alpha broken)" \
-    'a stack failing both passes fails the job and keeps the stamp file for the next boot'
+    'a stack failing both passes fails the job, skips the prune and keeps the stamp file'
 
-assert_eq "0 stamp=removed [maintenance-redeploy] retrying after first pass: needs-alpha [maintenance-redeploy] complete" \
+assert_eq "0 stamp=removed [maintenance-redeploy] retrying after first pass: needs-alpha $WAIT $SETTLE $DONE" \
     "$(run_redeploy_loop needs-alpha alpha)" \
     'a stack deployed before the stack it depends on comes back on the retry pass'
 
-assert_eq "1 stamp=kept [maintenance-redeploy] retrying after first pass: needs-alpha broken [maintenance-redeploy] FAILED to redeploy: broken" \
+assert_eq "1 stamp=kept [maintenance-redeploy] retrying after first pass: needs-alpha broken [maintenance-redeploy] FAILED to redeploy: broken $WAIT $SETTLE" \
     "$(run_redeploy_loop needs-alpha broken alpha)" \
     'only stacks failing the retry pass too are reported as failed'
 
-assert_eq "1 stamp=kept [maintenance-redeploy] STOPPED and NOT redeployed — no Infisical secrets for environment 'dev': skipped" \
+assert_eq "0 stamp=removed [maintenance-redeploy] skipped (no Infisical secrets for environment 'dev'), left running as before: skipped $WAIT $SETTLE $DONE" \
     "$(run_redeploy_loop alpha skipped)" \
-    'a skipped stack was torn down and stays down — it must not report success'
+    'a skipped stack was never stopped — reported, not a failure'
 
-assert_eq "1 stamp=kept [maintenance-redeploy] retrying after first pass: broken [maintenance-redeploy] FAILED to redeploy: broken [maintenance-redeploy] STOPPED and NOT redeployed — no Infisical secrets for environment 'dev': skipped" \
+assert_eq "1 stamp=kept $WAIT [maintenance-redeploy] UNHEALTHY after 0s: crashloop (restarting: Restarting (1) 3 seconds ago)" \
+    "$(run_redeploy_loop alpha crashloop)" \
+    'a stack Portainer accepted but whose containers do not come up fails the job'
+
+assert_eq "1 stamp=kept [maintenance-redeploy] retrying after first pass: broken [maintenance-redeploy] FAILED to redeploy: broken [maintenance-redeploy] skipped (no Infisical secrets for environment 'dev'), left running as before: skipped $WAIT $SETTLE" \
     "$(run_redeploy_loop broken skipped alpha)" \
     'failed and skipped stacks are reported separately'
 

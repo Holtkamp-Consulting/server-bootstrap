@@ -291,6 +291,9 @@ PORTAINER_PORT_HTTP="${PORTAINER_PORT_HTTP:-9000}"
 PORTAINER_PORT_HTTPS="${PORTAINER_PORT_HTTPS:-9443}"
 PORTAINER_PROXY_PORT="${PORTAINER_PROXY_PORT:-9444}"
 MAINTENANCE_SCHEDULE="${MAINTENANCE_SCHEDULE:-Sat *-*-* 00:00:00}"
+# Captured before the deploy config is sourced, which would otherwise overwrite
+# a new value passed on this run with the one already persisted.
+ALERT_WEBHOOK_URL_ARG="${ALERT_WEBHOOK_URL:-}"
 RAW_BASE="https://raw.githubusercontent.com/Holtkamp-Consulting/server-bootstrap/main"
 DEPLOY_CONFIG="/etc/infisical-deploy.env"
 
@@ -1070,18 +1073,37 @@ log "Step 9/9 — Installing scheduled maintenance timer"
 sudo mkdir -p /opt/deploy /var/lib/server-bootstrap
 
 
-for f in maintenance-update.sh maintenance-redeploy.sh; do
+for f in maintenance-update.sh maintenance-redeploy.sh notify-failure.sh; do
     curl -fsSL "${RAW_BASE}/${f}" | sudo tee "/opt/deploy/${f}" > /dev/null
     sudo chmod +x "/opt/deploy/${f}"
 done
 
-for f in maintenance-update.service maintenance-redeploy.service; do
+for f in maintenance-update.service maintenance-redeploy.service server-bootstrap-alert@.service; do
     curl -fsSL "${RAW_BASE}/systemd/${f}" | sudo tee "/etc/systemd/system/${f}" > /dev/null
 done
 
 curl -fsSL "${RAW_BASE}/systemd/maintenance-update.timer" \
     | sed "s|__MAINTENANCE_SCHEDULE__|${MAINTENANCE_SCHEDULE}|" \
     | sudo tee /etc/systemd/system/maintenance-update.timer > /dev/null
+
+# Where a failed maintenance unit reports to (OnFailure= →
+# server-bootstrap-alert@.service → notify-failure.sh). Persisted like
+# PORTAINER_ACCESS_TOKEN: any previous line is replaced, never duplicated.
+if [ -n "$ALERT_WEBHOOK_URL_ARG" ]; then
+    # The temp copy holds every deploy secret: create it 600, never world-readable.
+    sudo install -m 600 /dev/null "${DEPLOY_CONFIG}.tmp"
+    sudo awk '!/^ALERT_WEBHOOK_URL=/' "$DEPLOY_CONFIG" \
+        | sudo tee "${DEPLOY_CONFIG}.tmp" > /dev/null
+    sudo mv "${DEPLOY_CONFIG}.tmp" "$DEPLOY_CONFIG"
+    printf 'ALERT_WEBHOOK_URL=%s\n' "$(quote_env_value "$ALERT_WEBHOOK_URL_ARG")" \
+        | sudo tee -a "$DEPLOY_CONFIG" > /dev/null
+    sudo chown root:docker "$DEPLOY_CONFIG"
+    sudo chmod 640 "$DEPLOY_CONFIG"
+    ok "Saved ALERT_WEBHOOK_URL to $DEPLOY_CONFIG"
+elif ! sudo grep -q '^ALERT_WEBHOOK_URL=' "$DEPLOY_CONFIG" 2>/dev/null; then
+    warn "No ALERT_WEBHOOK_URL configured — failed maintenance runs will NOT be reported."
+    warn "Re-run with ALERT_WEBHOOK_URL=<Teams Workflows webhook URL> bash install.sh to enable alerts."
+fi
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now maintenance-update.timer
