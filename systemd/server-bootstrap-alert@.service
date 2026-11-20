@@ -1,0 +1,8 @@
+[Unit]
+Description=server-bootstrap failure alert for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/deploy/notify-failure.sh %i

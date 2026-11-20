@@ -1,14 +1,17 @@
 [Unit]
-Description=server-bootstrap post-maintenance stack teardown and redeploy
+Description=server-bootstrap post-maintenance in-place stack redeploy
 ConditionPathExists=/var/lib/server-bootstrap/maintenance-reboot-pending
 After=docker.service network-online.target
 Wants=network-online.target
 Requires=docker.service
+OnFailure=server-bootstrap-alert@%n.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/opt/deploy/maintenance-redeploy.sh
+# A hung redeploy must fail (and alert) instead of blocking silently.
+TimeoutStartSec=45min
 
 [Install]
 WantedBy=multi-user.target

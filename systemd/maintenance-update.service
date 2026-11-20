@@ -2,8 +2,10 @@
 Description=server-bootstrap weekly OS update and reboot
 After=network-online.target
 Wants=network-online.target
+OnFailure=server-bootstrap-alert@%n.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/opt/deploy/maintenance-update.sh
+TimeoutStartSec=1h
